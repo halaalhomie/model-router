@@ -1,6 +1,8 @@
 import json
 import unittest
 
+from google.genai import errors
+
 from app.config import Settings
 from app.pipeline import run_pipeline
 from app.schemas import ModelCatalog
@@ -16,6 +18,7 @@ SETTINGS = Settings(
         reasoning_model="demo-reasoning-model",
         long_context_model="demo-long-context-model",
     ),
+    request_timeout_seconds=30.0,
 )
 
 
@@ -128,3 +131,85 @@ class RunPipelineTests(unittest.TestCase):
             )
 
         self.assertEqual(len(client.models.calls), 1)
+
+
+class RunPipelineFallbackTests(unittest.TestCase):
+    def test_falls_back_to_the_fast_model_when_the_routed_model_fails(self) -> None:
+        client = ScriptedClient(
+            [
+                FakeResponse(profile_json(task_type="coding")),
+                errors.ClientError(400, {"error": {"message": "bad request"}}),
+                FakeResponse("Fallback answer."),
+            ]
+        )
+
+        result = run_pipeline(
+            "Fix this bug.",
+            client=client,  # type: ignore[arg-type]
+            settings=SETTINGS,
+        )
+
+        self.assertEqual(result.response.text, "Fallback answer.")
+        self.assertEqual(result.response.model_name, "demo-fast-model")
+        self.assertTrue(result.response.fallback_used)
+        self.assertEqual(result.response.original_model, "demo-code-model")
+        # decision still records what the router actually chose
+        self.assertEqual(result.decision.model_name, "demo-code-model")
+
+        second_call = client.models.calls[1]
+        third_call = client.models.calls[2]
+        self.assertEqual(second_call["model"], "demo-code-model")
+        self.assertEqual(third_call["model"], "demo-fast-model")
+
+    def test_falls_back_when_the_routed_model_returns_an_empty_reply(self) -> None:
+        client = ScriptedClient(
+            [
+                FakeResponse(profile_json(task_type="coding")),
+                FakeResponse(""),
+                FakeResponse("Fallback answer."),
+            ]
+        )
+
+        result = run_pipeline(
+            "Fix this bug.",
+            client=client,  # type: ignore[arg-type]
+            settings=SETTINGS,
+        )
+
+        self.assertTrue(result.response.fallback_used)
+        self.assertEqual(result.response.text, "Fallback answer.")
+
+    def test_does_not_fall_back_again_when_already_routed_to_fast_model(
+        self,
+    ) -> None:
+        """fast_model is the fallback target -- if it's also the routed
+        model and it fails, there is nowhere safer left to fall back to."""
+        client = ScriptedClient(
+            [
+                FakeResponse(profile_json(task_type="factual")),
+                errors.ClientError(400, {"error": {"message": "bad request"}}),
+            ]
+        )
+
+        with self.assertRaises(errors.ClientError):
+            run_pipeline(
+                "What is 2+2?",
+                client=client,  # type: ignore[arg-type]
+                settings=SETTINGS,
+            )
+
+        self.assertEqual(len(client.models.calls), 2)  # no third, fallback call
+
+    def test_does_not_fall_back_on_success(self) -> None:
+        client = ScriptedClient(
+            [FakeResponse(profile_json(task_type="coding")), FakeResponse("ok")]
+        )
+
+        result = run_pipeline(
+            "Fix this bug.",
+            client=client,  # type: ignore[arg-type]
+            settings=SETTINGS,
+        )
+
+        self.assertFalse(result.response.fallback_used)
+        self.assertIsNone(result.response.original_model)

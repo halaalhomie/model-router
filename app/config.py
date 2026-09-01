@@ -22,6 +22,19 @@ class Settings:
     gemini_api_key: str
     analyzer_model: str
     catalog: ModelCatalog
+    request_timeout_seconds: float
+
+
+# Live-measured request times on the configured catalog run 2-19s (see
+# README "Model availability"). 30s gives a normal request headroom without
+# leaving a stuck request hanging for the SDK's 10-minute default.
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
+
+# Gemini itself rejects a deadline under 10s with a 400 INVALID_ARGUMENT
+# ("Manually set deadline Ns is too short") -- discovered by live testing,
+# not documented anywhere obvious. Enforced here so a too-low override fails
+# at startup with a clear message instead of as a cryptic 400 mid-request.
+MIN_REQUEST_TIMEOUT_SECONDS = 10.0
 
 
 def require(name: str) -> str:
@@ -32,6 +45,30 @@ def require(name: str) -> str:
             f"{name} is missing. Add it to your .env file."
         )
     return value
+
+
+def optional_float(name: str, default: float) -> float:
+    """Read an optional numeric environment variable, or fall back to default."""
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        raise ConfigurationError(f"{name} must be a number, got {value!r}.")
+
+
+def load_request_timeout_seconds() -> float:
+    timeout = optional_float(
+        "REQUEST_TIMEOUT_SECONDS", DEFAULT_REQUEST_TIMEOUT_SECONDS
+    )
+    if timeout < MIN_REQUEST_TIMEOUT_SECONDS:
+        raise ConfigurationError(
+            f"REQUEST_TIMEOUT_SECONDS must be at least "
+            f"{MIN_REQUEST_TIMEOUT_SECONDS:g}: Gemini itself rejects a "
+            f"shorter deadline. Got {timeout:g}."
+        )
+    return timeout
 
 
 def load_settings() -> Settings:
@@ -47,4 +84,5 @@ def load_settings() -> Settings:
             reasoning_model=require("GEMINI_REASONING_MODEL"),
             long_context_model=require("GEMINI_LONG_CONTEXT_MODEL"),
         ),
+        request_timeout_seconds=load_request_timeout_seconds(),
     )

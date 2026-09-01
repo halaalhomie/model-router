@@ -84,3 +84,30 @@ class FormatResultTests(unittest.TestCase):
 
         self.assertIn("—", output)
         output.encode("utf-8")
+
+    def test_shows_a_fallback_line_when_fallback_was_used(self) -> None:
+        result = make_result("Fallback answer.")
+        result = result.model_copy(
+            update={
+                "response": result.response.model_copy(
+                    update={
+                        "fallback_used": True,
+                        "original_model": "demo-reasoning-model",
+                        "model_name": "demo-fast-model",
+                    }
+                )
+            }
+        )
+
+        output = format_result(result)
+
+        self.assertIn(
+            "fallback     : demo-reasoning-model failed, "
+            "used demo-fast-model instead",
+            output,
+        )
+
+    def test_omits_the_fallback_line_when_not_used(self) -> None:
+        output = format_result(make_result("Answer."))
+
+        self.assertNotIn("fallback", output)

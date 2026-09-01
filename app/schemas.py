@@ -66,11 +66,20 @@ class TokenUsage(BaseModel):
 
 
 class ModelResponse(BaseModel):
-    """One model's reply, plus the usage data the evaluation platform needs."""
+    """One model's reply, plus the usage data the evaluation platform needs.
+
+    model_name is whichever model actually produced `text` -- if the routed
+    model failed and the pipeline fell back, this is the fallback model, not
+    the one RoutingDecision originally chose. original_model preserves that
+    original choice so telemetry can tell "routed correctly but the model
+    was down" apart from "routed to the wrong model".
+    """
 
     model_name: str
     text: str
     usage: TokenUsage | None = None
+    fallback_used: bool = False
+    original_model: str | None = None
 
 
 class PipelineResult(BaseModel):

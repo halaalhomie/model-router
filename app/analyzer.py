@@ -1,6 +1,7 @@
 from google import genai
 from google.genai import types
 
+from app.retry import call_with_retry
 from app.schemas import TaskProfile
 
 
@@ -25,13 +26,15 @@ def analyze_task(
     if not request_text.strip():
         raise ValueError("request_text must not be empty.")
 
-    response = client.models.generate_content(
-        model=model_name,
-        contents=f"{ANALYSIS_INSTRUCTIONS}\n\nUser request:\n{request_text}",
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=TaskProfile,
-        ),
+    response = call_with_retry(
+        lambda: client.models.generate_content(
+            model=model_name,
+            contents=f"{ANALYSIS_INSTRUCTIONS}\n\nUser request:\n{request_text}",
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=TaskProfile,
+            ),
+        )
     )
 
     if not response.text:

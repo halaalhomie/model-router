@@ -1,6 +1,7 @@
 import sys
 
 from google import genai
+from google.genai import types
 
 from app.config import ConfigurationError, load_settings
 from app.pipeline import run_pipeline
@@ -45,6 +46,12 @@ def format_result(result: PipelineResult) -> str:
         f"reason       : {result.decision.reason}",
     ]
 
+    if result.response.fallback_used:
+        lines.append(
+            f"fallback     : {result.response.original_model} failed, "
+            f"used {result.response.model_name} instead"
+        )
+
     usage = result.response.usage
     if usage is not None:
         lines.append(
@@ -74,7 +81,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Configuration error: {error}", file=sys.stderr)
         return 2
 
-    client = genai.Client(api_key=settings.gemini_api_key)
+    client = genai.Client(
+        api_key=settings.gemini_api_key,
+        http_options=types.HttpOptions(
+            timeout=int(settings.request_timeout_seconds * 1000)
+        ),
+    )
     result = run_pipeline(request_text, client=client, settings=settings)
 
     print(format_result(result))

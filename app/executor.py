@@ -1,5 +1,6 @@
 from google import genai
 
+from app.retry import call_with_retry
 from app.schemas import ModelResponse, TokenUsage
 
 
@@ -13,9 +14,11 @@ def execute_request(
     if not request_text.strip():
         raise ValueError("request_text must not be empty.")
 
-    response = client.models.generate_content(
-        model=model_name,
-        contents=request_text,
+    response = call_with_retry(
+        lambda: client.models.generate_content(
+            model=model_name,
+            contents=request_text,
+        )
     )
 
     if not response.text:

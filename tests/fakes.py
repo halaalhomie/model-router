@@ -23,9 +23,14 @@ class FakeResponse:
 
 
 class ScriptedModels:
-    """Return queued responses in order and record every request."""
+    """Return queued responses in order and record every request.
 
-    def __init__(self, responses: list[FakeResponse]) -> None:
+    A queued item that is an Exception is raised instead of returned, so
+    tests can script "fails twice, then succeeds" without a real network
+    call.
+    """
+
+    def __init__(self, responses: list[FakeResponse | Exception]) -> None:
         self.responses = list(responses)
         self.calls: list[dict[str, object]] = []
 
@@ -35,9 +40,12 @@ class ScriptedModels:
             raise AssertionError(
                 "generate_content called more times than queued."
             )
-        return self.responses.pop(0)
+        result = self.responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 class ScriptedClient:
-    def __init__(self, responses: list[FakeResponse]) -> None:
+    def __init__(self, responses: list[FakeResponse | Exception]) -> None:
         self.models = ScriptedModels(responses)

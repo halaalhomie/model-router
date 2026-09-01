@@ -32,6 +32,46 @@ class LoadSettingsTests(unittest.TestCase):
         self.assertEqual(settings.catalog.reasoning_model, "reasoning")
         self.assertEqual(settings.catalog.long_context_model, "long-context")
 
+    def test_defaults_the_request_timeout_when_unset(self) -> None:
+        with mock.patch.dict("os.environ", COMPLETE_ENV, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(settings.request_timeout_seconds, 30.0)
+
+    def test_reads_the_request_timeout_override(self) -> None:
+        env = dict(COMPLETE_ENV, REQUEST_TIMEOUT_SECONDS="45")
+
+        with mock.patch.dict("os.environ", env, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(settings.request_timeout_seconds, 45.0)
+
+    def test_rejects_a_non_numeric_request_timeout(self) -> None:
+        env = dict(COMPLETE_ENV, REQUEST_TIMEOUT_SECONDS="soon")
+
+        with mock.patch.dict("os.environ", env, clear=True):
+            with self.assertRaises(ConfigurationError):
+                load_settings()
+
+    def test_rejects_a_timeout_below_geminis_own_floor(self) -> None:
+        """Gemini itself returns 400 'deadline too short' under 10s --
+        caught here at startup instead of mid-request."""
+        env = dict(COMPLETE_ENV, REQUEST_TIMEOUT_SECONDS="5")
+
+        with mock.patch.dict("os.environ", env, clear=True):
+            with self.assertRaises(ConfigurationError) as caught:
+                load_settings()
+
+        self.assertIn("REQUEST_TIMEOUT_SECONDS", str(caught.exception))
+
+    def test_accepts_a_timeout_exactly_at_the_floor(self) -> None:
+        env = dict(COMPLETE_ENV, REQUEST_TIMEOUT_SECONDS="10")
+
+        with mock.patch.dict("os.environ", env, clear=True):
+            settings = load_settings()  # must not raise
+
+        self.assertEqual(settings.request_timeout_seconds, 10.0)
+
     def test_names_the_variable_that_is_missing(self) -> None:
         for missing in COMPLETE_ENV:
             partial = {k: v for k, v in COMPLETE_ENV.items() if k != missing}

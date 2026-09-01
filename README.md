@@ -9,13 +9,16 @@ the most expensive model available.
 CLI request
     |
     v
-ANALYZER  (cheap model, structured output -> TaskProfile)
+ANALYZER  (cheap model, structured output -> TaskProfile, retries transient errors)
     |
     v
 ROUTER    (pure function: TaskProfile + ModelCatalog -> RoutingDecision)
     |
     v
-EXECUTOR  (calls the selected model, captures token usage)
+EXECUTOR  (calls the selected model, retries transient errors, captures usage)
+    |
+    v
+[failed after retries?] -- yes --> retry once on fast_model, mark fallback_used
     |
     v
 PipelineResult -> printed
@@ -55,7 +58,8 @@ that needs it, so tests pass fake clients instead (see `tests/fakes.py`).
 | `app/analyzer.py` | Request -> validated `TaskProfile` |
 | `app/router.py` | `TaskProfile` -> `RoutingDecision` (pure, no I/O) |
 | `app/executor.py` | Runs the selected model, captures token usage |
-| `app/pipeline.py` | Orchestrates analyze -> route -> execute |
+| `app/retry.py` | Exponential-backoff retry for transient provider errors |
+| `app/pipeline.py` | Orchestrates analyze -> route -> execute, with fallback |
 | `app/main.py` | CLI adapter over the pipeline |
 
 ## Design notes
@@ -81,6 +85,18 @@ neither owns the logic.
 would change the underlying model without warning, which would invalidate any
 historical evaluation metrics collected against it.
 
+**What retries, and what falls back?** `app/retry.py` retries one call (with
+exponential backoff) on 5xx errors, 429 rate limits, and network timeouts --
+failures worth waiting out. A 400/404 is a defect in the request itself, so it
+is not retried; retrying it three times would only waste the timeout budget on
+an outcome that was never in doubt. If the *routed* model still fails after its
+own retries, `pipeline.py` retries the whole request once on `fast_model` and
+marks the result `fallback_used` -- because in this project's own measurements
+(below), a model failing mid-request is routine, not exceptional. A request
+already routed to `fast_model` has nowhere safer to fall back to, so its
+failure propagates. The analyzer has no such fallback yet: a persistent
+classification failure still fails the whole request.
+
 ## Model availability
 
 `client.models.list()` is not a reliable guide to what a key can actually call.
@@ -102,15 +118,17 @@ Two consequences worth understanding:
    which is enough to build and demonstrate routing, but Phase 5 will not be able
    to show a large *quality* gap between tiers until a stronger model is
    reachable.
-2. **Models fail in normal operation**, not just in theory. A route to a model
-   returning 504 or 429 currently kills the request. That makes the Phase 3
-   fallback work concrete rather than hypothetical.
+2. **Models fail in normal operation**, not just in theory. `gemini-3.7-flash`
+   reliably 504s and every pro-tier model 429s -- confirmed live, not just in
+   this table. Retry and fallback (see "What retries, and what falls back?"
+   above) exist because of this measurement, not on general principle.
 
 ## Roadmap
 
 Phase 1 Basic LLM integration — done
 Phase 2 Intelligent routing — done
-Phase 3 Reliability: FastAPI, retries, timeouts, fallbacks, confidence routing
+Phase 3 Reliability — in progress: retries, timeouts, and fallback done;
+         FastAPI and confidence-aware routing still open
 Phase 4 Kafka event pipeline
 Phase 5 Evaluation
 Phase 6 PostgreSQL
