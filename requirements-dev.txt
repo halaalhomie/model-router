@@ -2,3 +2,8 @@
 # image we build in Phase 10 does not ship a test runner.
 -r requirements.txt
 pytest>=8.0.0,<9.0.0
+# fastapi.testclient.TestClient needs plain httpx (not httpx2, which
+# google-genai uses) -- it happened to already be present transitively in
+# this venv, but pinning it explicitly means a fresh install doesn't
+# silently depend on some other package continuing to pull it in.
+httpx>=0.27.0,<1.0.0
