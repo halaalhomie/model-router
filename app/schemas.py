@@ -49,3 +49,34 @@ class RoutingDecision(BaseModel):
 
     model_name: str
     reason: str
+
+
+class TokenUsage(BaseModel):
+    """Token counts reported by the provider for one model call.
+
+    Reasoning models bill hidden "thinking" tokens as output, which is why
+    total_tokens is usually larger than prompt_tokens + output_tokens. Cost
+    calculations must use thinking_tokens or they will understate the bill.
+    """
+
+    prompt_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    thinking_tokens: int = Field(ge=0, default=0)
+    total_tokens: int = Field(ge=0)
+
+
+class ModelResponse(BaseModel):
+    """One model's reply, plus the usage data the evaluation platform needs."""
+
+    model_name: str
+    text: str
+    usage: TokenUsage | None = None
+
+
+class PipelineResult(BaseModel):
+    """Everything one request produced, from classification to final reply."""
+
+    request_text: str
+    profile: TaskProfile
+    decision: RoutingDecision
+    response: ModelResponse

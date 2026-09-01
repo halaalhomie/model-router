@@ -1,4 +1,7 @@
-.env
+# Ignore every .env variant (.env, .env.backup, .env.local) except the
+# committed template, so a stray copy can never carry a key into git.
+.env*
+!.env.example
 venv/
 __pycache__/
 *.py[cod]

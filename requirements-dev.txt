@@ -1,0 +1,4 @@
+# Test-only dependencies. Kept separate from requirements.txt so the runtime
+# image we build in Phase 10 does not ship a test runner.
+-r requirements.txt
+pytest>=8.0.0,<9.0.0
