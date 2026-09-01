@@ -14,7 +14,8 @@ CLI request          HTTP POST /route
 ANALYZER  (cheap model, structured output -> TaskProfile, retries transient errors)
     |
     v
-ROUTER    (pure function: TaskProfile + ModelCatalog -> RoutingDecision)
+ROUTER    (pure function: TaskProfile + ModelCatalog -> RoutingDecision;
+           low confidence overrides every other rule -- see below)
     |
     v
 EXECUTOR  (calls the selected model, retries transient errors, captures usage)
@@ -121,6 +122,21 @@ already routed to `fast_model` has nowhere safer to fall back to, so its
 failure propagates. The analyzer has no such fallback yet: a persistent
 classification failure still fails the whole request.
 
+**Why does low confidence override every other routing rule, not just add
+one more rule?** `TaskProfile.confidence` describes the classification as a
+whole -- there's one score, not one per field. A profile with confidence
+0.5 doesn't mean "context_size is uncertain but task_type is fine"; every
+field came from the same uncertain classification. So `router.py` checks
+confidence *first*: below `CONFIDENCE_THRESHOLD` (0.6, an unmeasured
+starting guess -- Phase 5 should tune it from real accuracy data), routing
+falls back to `reasoning_model` regardless of what `context_size` or
+`task_type` say, because trusting those fields to pick a specialized model
+would be trusting a coin flip. Confirmed live: a deliberately vague prompt
+("so like, idk, maybe do the thing with the stuff from before") scored
+confidence 0.50, correctly routed to the reasoning model over the normal
+rules -- and that model then failed on its own, correctly triggering the
+*separate* fallback mechanism above. Both Phase 3 safety nets, one request.
+
 ## FastAPI concepts used here
 
 **FastAPI vs. uvicorn.** FastAPI defines *what* exists: which URLs are
@@ -206,8 +222,8 @@ Two consequences worth understanding:
 
 Phase 1 Basic LLM integration — done
 Phase 2 Intelligent routing — done
-Phase 3 Reliability — in progress: retries, timeouts, fallback, and the
-         FastAPI transport are done; confidence-aware routing still open
+Phase 3 Reliability — done: retries, timeouts, fallback, the FastAPI
+         transport, and confidence-aware routing
 Phase 4 Kafka event pipeline
 Phase 5 Evaluation
 Phase 6 PostgreSQL

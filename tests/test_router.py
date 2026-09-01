@@ -49,3 +49,47 @@ class RouterTests(unittest.TestCase):
         decision = select_model(make_profile(task_type="factual"), CATALOG)
 
         self.assertEqual(decision.model_name, "demo-fast-model")
+
+
+class ConfidenceAwareRoutingTests(unittest.TestCase):
+    """confidence describes the whole classification, not one field, so a
+    low score should override every rule above -- including large_context,
+    which otherwise has top priority."""
+
+    def test_low_confidence_overrides_large_context(self) -> None:
+        decision = select_model(
+            make_profile(context_size="large", confidence=0.4), CATALOG
+        )
+
+        self.assertEqual(decision.model_name, "demo-reasoning-model")
+
+    def test_low_confidence_overrides_coding(self) -> None:
+        decision = select_model(
+            make_profile(task_type="coding", confidence=0.4), CATALOG
+        )
+
+        self.assertEqual(decision.model_name, "demo-reasoning-model")
+
+    def test_low_confidence_overrides_the_fast_model_default(self) -> None:
+        decision = select_model(
+            make_profile(task_type="factual", confidence=0.4), CATALOG
+        )
+
+        self.assertEqual(decision.model_name, "demo-reasoning-model")
+        self.assertIn("0.40", decision.reason)
+
+    def test_confidence_exactly_at_the_threshold_is_trusted(self) -> None:
+        """The threshold is an exclusive lower bound: AT 0.6, the profile
+        is trusted and normal routing applies."""
+        decision = select_model(
+            make_profile(task_type="coding", confidence=0.6), CATALOG
+        )
+
+        self.assertEqual(decision.model_name, "demo-code-model")
+
+    def test_confidence_just_below_the_threshold_is_not_trusted(self) -> None:
+        decision = select_model(
+            make_profile(task_type="coding", confidence=0.59), CATALOG
+        )
+
+        self.assertEqual(decision.model_name, "demo-reasoning-model")
