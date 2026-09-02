@@ -2,11 +2,18 @@ import sys
 
 from app.client import build_client
 from app.config import ConfigurationError, load_settings
+from app.events import KafkaEventPublisher, build_producer
 from app.pipeline import run_pipeline
 from app.schemas import PipelineResult
 
 
 USAGE = 'Usage: python -m app.main "your request here"'
+
+# How long to wait, at process exit, for any queued Kafka message to
+# actually reach the broker (see app/events.py's module docstring for why
+# this -- and only this -- is where flush() belongs). Bounded so a
+# down/unreachable Kafka delays exit by at most this long, never hangs it.
+KAFKA_FLUSH_TIMEOUT_SECONDS = 5.0
 
 
 def use_utf8(stream: object) -> None:
@@ -34,6 +41,7 @@ def format_result(result: PipelineResult) -> str:
     """Show the routing decision above the answer, so the choice is visible."""
     profile = result.profile
     lines = [
+        f"request id   : {result.request_id}",
         f"task type    : {profile.task_type}",
         f"difficulty   : {profile.difficulty}",
         f"reasoning    : {profile.reasoning_required}",
@@ -59,6 +67,7 @@ def format_result(result: PipelineResult) -> str:
             f"{usage.total_tokens} total"
         )
 
+    lines.append(f"latency      : {result.latency_ms:.0f} ms")
     lines.extend(["", result.response.text])
     return "\n".join(lines)
 
@@ -80,9 +89,28 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     client = build_client(settings)
-    result = run_pipeline(request_text, client=client, settings=settings)
+    producer = build_producer(settings)
+    publisher = KafkaEventPublisher(producer)
+
+    result = run_pipeline(
+        request_text, client=client, settings=settings, publisher=publisher
+    )
 
     print(format_result(result))
+
+    # The process is about to exit -- flush now, or whatever publish()
+    # queued but hadn't sent yet is silently lost. This is a one-shot CLI
+    # process, not a long-lived server, so blocking briefly here (after the
+    # user already has their answer) is the right tradeoff; api.py flushes
+    # at server shutdown instead, for the same reason.
+    still_queued = producer.flush(KAFKA_FLUSH_TIMEOUT_SECONDS)
+    if still_queued > 0:
+        print(
+            f"Warning: {still_queued} Kafka message(s) were not delivered "
+            f"before exit.",
+            file=sys.stderr,
+        )
+
     return 0
 
 

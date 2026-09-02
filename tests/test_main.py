@@ -12,6 +12,7 @@ from app.schemas import (
 
 def make_result(text: str) -> PipelineResult:
     return PipelineResult(
+        request_id="req-abc",
         request_text="Explain sharding.",
         profile=TaskProfile(
             task_type="reasoning",
@@ -35,6 +36,7 @@ def make_result(text: str) -> PipelineResult:
                 total_tokens=1473,
             ),
         ),
+        latency_ms=1234.5,
     )
 
 

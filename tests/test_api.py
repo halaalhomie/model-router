@@ -9,57 +9,36 @@ because every test below overrides get_settings/get_client -- the real
 ones, which read app.state, are never actually called.
 """
 
-import json
 import unittest
 
 from fastapi.testclient import TestClient
 from google.genai import errors
 
-from app.api import app, get_client, get_settings
-from app.config import Settings
-from app.schemas import ModelCatalog
-from tests.fakes import FakeResponse, ScriptedClient
-
-
-SETTINGS = Settings(
-    gemini_api_key="test-key",
-    analyzer_model="demo-analyzer-model",
-    catalog=ModelCatalog(
-        fast_model="demo-fast-model",
-        code_model="demo-code-model",
-        reasoning_model="demo-reasoning-model",
-        long_context_model="demo-long-context-model",
-    ),
-    request_timeout_seconds=30.0,
+from app.api import app, get_client, get_publisher, get_settings
+from tests.fakes import (
+    SETTINGS,
+    FakeEventPublisher,
+    FakeResponse,
+    ScriptedClient,
+    profile_json,
 )
 
 
-def profile_json(**changes: object) -> str:
-    values: dict[str, object] = {
-        "task_type": "general",
-        "difficulty": "low",
-        "reasoning_required": "low",
-        "context_size": "small",
-        "output_type": "text",
-        "confidence": 0.9,
-    }
-    values.update(changes)
-    return json.dumps(values)
-
-
 class ApiTestCase(unittest.TestCase):
-    """Wires a ScriptedClient in for get_client/get_settings on every test,
-    via FastAPI's dependency_overrides -- the standard way to swap out
-    what a Depends() resolves to during a test, without touching app.state
-    or lifespan at all."""
+    """Wires fakes in for get_client/get_settings/get_publisher on every
+    test, via FastAPI's dependency_overrides -- the standard way to swap
+    out what a Depends() resolves to during a test, without touching
+    app.state or lifespan at all."""
 
     def setUp(self) -> None:
         self.client = TestClient(app)
+        self.publisher = FakeEventPublisher()
         self.addCleanup(app.dependency_overrides.clear)
 
     def override(self, scripted: ScriptedClient) -> None:
         app.dependency_overrides[get_settings] = lambda: SETTINGS
         app.dependency_overrides[get_client] = lambda: scripted
+        app.dependency_overrides[get_publisher] = lambda: self.publisher
 
 
 class HealthTests(unittest.TestCase):
@@ -87,6 +66,28 @@ class RouteEndpointTests(ApiTestCase):
         self.assertEqual(body["profile"]["task_type"], "coding")
         self.assertEqual(body["decision"]["model_name"], "demo-code-model")
         self.assertEqual(body["response"]["text"], "def solve(): ...")
+
+    def test_response_carries_the_telemetry_fields(self) -> None:
+        self.override(
+            ScriptedClient([FakeResponse(profile_json()), FakeResponse("ok")])
+        )
+
+        body = self.client.post("/route", json={"text": "Hi."}).json()
+
+        self.assertTrue(body["request_id"])
+        self.assertGreater(body["latency_ms"], 0)
+
+    def test_publishes_an_event_for_a_successful_request(self) -> None:
+        self.override(
+            ScriptedClient([FakeResponse(profile_json()), FakeResponse("ok")])
+        )
+
+        body = self.client.post("/route", json={"text": "Hi."}).json()
+
+        self.assertEqual(len(self.publisher.published), 1)
+        self.assertEqual(
+            self.publisher.published[0].request_id, body["request_id"]
+        )
 
     def test_rejects_blank_text_before_touching_the_model(self) -> None:
         scripted = ScriptedClient([])  # would raise AssertionError if called

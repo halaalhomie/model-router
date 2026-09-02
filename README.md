@@ -24,7 +24,10 @@ EXECUTOR  (calls the selected model, retries transient errors, captures usage)
 [failed after retries?] -- yes --> retry once on fast_model, mark fallback_used
     |
     v
-PipelineResult -> printed, or returned as JSON
+PipelineResult -+-> printed, or returned as JSON   (synchronous: the caller waits)
+                |
+                +-> Kafka topic model-router.requests
+                       (asynchronous: best-effort, never blocks the caller)
 ```
 
 Two transports, one pipeline: `app/main.py` (CLI) and `app/api.py` (HTTP) both
@@ -35,8 +38,14 @@ call the same `run_pipeline()`. Neither owns the analyze/route/execute logic.
 1. Copy `.env.example` to `.env` and set `GEMINI_API_KEY`.
 2. Install dependencies:
    `venv\Scripts\python.exe -m pip install -r requirements-dev.txt`
+3. Start Kafka and Postgres (needs Docker Desktop running):
+   `docker compose up -d`
 
 Keep `.env` private. Every `.env*` file except `.env.example` is ignored by Git.
+
+Step 3 is optional for running the router itself: if Kafka is unreachable,
+requests still succeed and only event publishing is skipped (with a logged
+warning). Nothing uses Postgres until Phase 6.
 
 ## Run
 
@@ -83,6 +92,7 @@ that needs it, so tests pass fake clients instead (see `tests/fakes.py`).
 | `app/retry.py` | Exponential-backoff retry for transient provider errors |
 | `app/pipeline.py` | Orchestrates analyze -> route -> execute, with fallback |
 | `app/client.py` | Builds the one Gemini client both transports share |
+| `app/events.py` | Publishes one Kafka event per completed request |
 | `app/main.py` | CLI adapter over the pipeline |
 | `app/api.py` | HTTP adapter over the pipeline (FastAPI + uvicorn) |
 
@@ -192,6 +202,70 @@ these deliberately, rather than returning `200` with an error message in the
 body, is what lets a caller branch on `response.status_code` instead of
 parsing text.
 
+## Kafka concepts used here
+
+**Why Kafka at all, and why not in the request path?** The router produces
+data worth analyzing -- which model was chosen, what it cost, how long it
+took, whether fallback fired. Analytics, evaluation, and logging all want
+that same data, at their own pace, without any of them slowing down the
+person waiting for an answer. That is the actual problem Kafka solves here:
+one producer, many independent consumers, none of them in the caller's way.
+If it were in the synchronous path, a slow or down Kafka would make the
+whole router slow or down -- strictly worse than not having it.
+
+**Broker, topic, partition.** The broker is the server (our `kafka`
+container). A topic (`model-router.requests`) is a named stream. Each topic
+is split into partitions, and each partition is an independent append-only
+log. Kafka guarantees ordering *within* a partition, not across a topic --
+that is the tradeoff that buys parallelism, since partitions can be
+consumed independently.
+
+**Keys decide partitions.** `KafkaEventPublisher` keys each event by
+`request_id`. Kafka hashes the key to pick a partition, so all events
+sharing a key land in the same partition and keep their relative order.
+With one event per request today this mainly spreads load, but it is what
+makes ordering work if a request ever emits several events.
+
+**Consumer groups and offsets.** An offset is how far a consumer group has
+read into a partition. Kafka stores it server-side, per group -- not in the
+consumer process -- which is why a restarted consumer resumes where it left
+off, and why two different groups can read the same topic completely
+independently (analytics and evaluation will each be their own group).
+`kafka-consumer-groups.sh --describe --group <name>` shows
+`CURRENT-OFFSET` / `LOG-END-OFFSET` / `LAG` per partition; lag is the
+single most useful "is my consumer keeping up" number.
+
+**Retention.** Kafka keeps messages for a configured time whether or not
+anyone consumed them (default `log.retention.hours=168`, one week). This is
+the real difference from a traditional queue, where a message disappears
+once acknowledged -- and it is what lets a new consumer group be added
+later and still read last week's events.
+
+**produce vs. poll vs. flush** -- the easiest thing to get wrong:
+`produce()` queues locally and returns immediately (this is what makes
+publishing async); `poll(0)` services already-completed delivery callbacks
+without blocking; `flush()` blocks until everything queued is actually
+sent. `flush()` belongs only where a process is about to exit and would
+otherwise drop queued messages -- `main.py` after printing the answer, and
+`api.py`'s lifespan shutdown. Calling it per request would convert this
+whole async design back into a synchronous one.
+
+**Delivery semantics.** Today this is at-most-once: `publish_safely()`
+swallows failures, so an event can be lost (Kafka down, or the process
+dies with messages still queued) and is never retried. That is a
+deliberate choice -- telemetry loss is cheaper than failing a user's
+request, and cheaper than the complexity of an outbox table. Moving to
+at-least-once would mean persisting the event locally first and retrying
+delivery, which is a real option once Phase 6 gives us a database to put
+an outbox in.
+
+**Verified end to end**, not just unit-tested: a CLI run and an HTTP
+`POST /route` each produced an event on `model-router.requests` whose
+`request_id` matched the response, read back with
+`kafka-console-consumer.sh`. With Kafka deliberately stopped, both
+transports still returned complete, correct answers -- only a warning
+line differed.
+
 ## Model availability
 
 `client.models.list()` is not a reliable guide to what a key can actually call.
@@ -224,7 +298,8 @@ Phase 1 Basic LLM integration — done
 Phase 2 Intelligent routing — done
 Phase 3 Reliability — done: retries, timeouts, fallback, the FastAPI
          transport, and confidence-aware routing
-Phase 4 Kafka event pipeline
+Phase 4 Kafka — in progress: infrastructure and the producer are done
+         (one event per request); consumers are next
 Phase 5 Evaluation
 Phase 6 PostgreSQL
 Phase 7 LangChain

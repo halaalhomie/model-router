@@ -83,9 +83,17 @@ class ModelResponse(BaseModel):
 
 
 class PipelineResult(BaseModel):
-    """Everything one request produced, from classification to final reply."""
+    """Everything one request produced, from classification to final reply.
 
+    request_id and latency_ms exist for telemetry, not for the pipeline's
+    own logic: request_id is what a Kafka event, and later a Postgres row,
+    correlates back to one request; latency_ms is the first real evaluation
+    metric this project collects.
+    """
+
+    request_id: str
     request_text: str
     profile: TaskProfile
     decision: RoutingDecision
     response: ModelResponse
+    latency_ms: float

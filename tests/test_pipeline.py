@@ -1,38 +1,16 @@
-import json
 import unittest
 
 from google.genai import errors
 
-from app.config import Settings
 from app.pipeline import run_pipeline
-from app.schemas import ModelCatalog
-from tests.fakes import FakeResponse, FakeUsage, ScriptedClient
-
-
-SETTINGS = Settings(
-    gemini_api_key="test-key",
-    analyzer_model="demo-analyzer-model",
-    catalog=ModelCatalog(
-        fast_model="demo-fast-model",
-        code_model="demo-code-model",
-        reasoning_model="demo-reasoning-model",
-        long_context_model="demo-long-context-model",
-    ),
-    request_timeout_seconds=30.0,
+from tests.fakes import (
+    SETTINGS,
+    FakeEventPublisher,
+    FakeResponse,
+    FakeUsage,
+    ScriptedClient,
+    profile_json,
 )
-
-
-def profile_json(**changes: object) -> str:
-    values: dict[str, object] = {
-        "task_type": "general",
-        "difficulty": "low",
-        "reasoning_required": "low",
-        "context_size": "small",
-        "output_type": "text",
-        "confidence": 0.9,
-    }
-    values.update(changes)
-    return json.dumps(values)
 
 
 class RunPipelineTests(unittest.TestCase):
@@ -213,3 +191,92 @@ class RunPipelineFallbackTests(unittest.TestCase):
 
         self.assertFalse(result.response.fallback_used)
         self.assertIsNone(result.response.original_model)
+
+
+class PipelineTelemetryTests(unittest.TestCase):
+    def scripted(self) -> ScriptedClient:
+        return ScriptedClient(
+            [FakeResponse(profile_json()), FakeResponse("Answer.")]
+        )
+
+    def test_assigns_a_unique_request_id_per_run(self) -> None:
+        first = run_pipeline(
+            "Say hello.",
+            client=self.scripted(),  # type: ignore[arg-type]
+            settings=SETTINGS,
+        )
+        second = run_pipeline(
+            "Say hello.",
+            client=self.scripted(),  # type: ignore[arg-type]
+            settings=SETTINGS,
+        )
+
+        self.assertTrue(first.request_id)
+        self.assertNotEqual(first.request_id, second.request_id)
+
+    def test_records_latency(self) -> None:
+        result = run_pipeline(
+            "Say hello.",
+            client=self.scripted(),  # type: ignore[arg-type]
+            settings=SETTINGS,
+        )
+
+        self.assertGreater(result.latency_ms, 0)
+
+    def test_publishes_the_result_when_a_publisher_is_given(self) -> None:
+        publisher = FakeEventPublisher()
+
+        result = run_pipeline(
+            "Say hello.",
+            client=self.scripted(),  # type: ignore[arg-type]
+            settings=SETTINGS,
+            publisher=publisher,
+        )
+
+        self.assertEqual(publisher.published, [result])
+
+    def test_runs_without_a_publisher(self) -> None:
+        result = run_pipeline(
+            "Say hello.",
+            client=self.scripted(),  # type: ignore[arg-type]
+            settings=SETTINGS,
+        )
+
+        self.assertEqual(result.response.text, "Answer.")
+
+    def test_a_broken_publisher_does_not_fail_the_request(self) -> None:
+        """The whole point of keeping Kafka off the synchronous path: the
+        caller still gets their answer even if publishing blows up."""
+        publisher = FakeEventPublisher(error=RuntimeError("broker down"))
+
+        result = run_pipeline(
+            "Say hello.",
+            client=self.scripted(),  # type: ignore[arg-type]
+            settings=SETTINGS,
+            publisher=publisher,
+        )
+
+        self.assertEqual(result.response.text, "Answer.")
+
+    def test_publishes_only_after_the_response_is_complete(self) -> None:
+        """The event carries the finished result, fallback flags included --
+        so a consumer never sees a half-built request."""
+        client = ScriptedClient(
+            [
+                FakeResponse(profile_json(task_type="coding")),
+                errors.ClientError(400, {"error": {"message": "bad request"}}),
+                FakeResponse("Fallback answer."),
+            ]
+        )
+        publisher = FakeEventPublisher()
+
+        run_pipeline(
+            "Fix this bug.",
+            client=client,  # type: ignore[arg-type]
+            settings=SETTINGS,
+            publisher=publisher,
+        )
+
+        published = publisher.published[0]
+        self.assertTrue(published.response.fallback_used)
+        self.assertEqual(published.response.text, "Fallback answer.")

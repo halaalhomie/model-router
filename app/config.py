@@ -23,12 +23,17 @@ class Settings:
     analyzer_model: str
     catalog: ModelCatalog
     request_timeout_seconds: float
+    kafka_bootstrap_servers: str
 
 
 # Live-measured request times on the configured catalog run 2-19s (see
 # README "Model availability"). 30s gives a normal request headroom without
 # leaving a stuck request hanging for the SDK's 10-minute default.
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
+
+# Matches docker-compose.yml's PLAINTEXT_HOST listener -- what Kafka is
+# reachable at from the host, not from inside another container.
+DEFAULT_KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
 
 # Gemini itself rejects a deadline under 10s with a 400 INVALID_ARGUMENT
 # ("Manually set deadline Ns is too short") -- discovered by live testing,
@@ -58,6 +63,11 @@ def optional_float(name: str, default: float) -> float:
         raise ConfigurationError(f"{name} must be a number, got {value!r}.")
 
 
+def optional_str(name: str, default: str) -> str:
+    """Read an optional environment variable, or fall back to default."""
+    return os.getenv(name) or default
+
+
 def load_request_timeout_seconds() -> float:
     timeout = optional_float(
         "REQUEST_TIMEOUT_SECONDS", DEFAULT_REQUEST_TIMEOUT_SECONDS
@@ -85,4 +95,7 @@ def load_settings() -> Settings:
             long_context_model=require("GEMINI_LONG_CONTEXT_MODEL"),
         ),
         request_timeout_seconds=load_request_timeout_seconds(),
+        kafka_bootstrap_servers=optional_str(
+            "KAFKA_BOOTSTRAP_SERVERS", DEFAULT_KAFKA_BOOTSTRAP_SERVERS
+        ),
     )

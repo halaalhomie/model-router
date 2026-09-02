@@ -27,8 +27,15 @@ from pydantic import BaseModel, field_validator
 
 from app.client import build_client
 from app.config import Settings, load_settings
+from app.events import EventPublisher, KafkaEventPublisher, build_producer
 from app.pipeline import EXECUTION_FAILURES, run_pipeline
 from app.schemas import PipelineResult
+
+
+# How long server shutdown may block draining any Kafka messages still
+# queued from the last few requests before the process exits. Bounded for
+# the same reason as main.py's flush -- see app/events.py.
+KAFKA_SHUTDOWN_FLUSH_TIMEOUT_SECONDS = 5.0
 
 
 @asynccontextmanager
@@ -45,9 +52,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     app.state.settings = load_settings()
     app.state.client = build_client(app.state.settings)
+    # One Producer for the server's whole lifetime, like the Gemini client
+    # above -- not one per request, which would mean reconnecting to Kafka
+    # on every call.
+    app.state.producer = build_producer(app.state.settings)
     yield
-    # Nothing to release on shutdown yet -- the Gemini client holds no
-    # connection pool of its own worth closing.
+    # The only place a Kafka flush belongs in a server: draining whatever
+    # the last few requests queued before this process actually exits. Per
+    # request would block the response on Kafka being reachable, exactly
+    # what this architecture exists to avoid -- see app/events.py.
+    app.state.producer.flush(KAFKA_SHUTDOWN_FLUSH_TIMEOUT_SECONDS)
 
 
 app = FastAPI(title="Model Router", lifespan=lifespan)
@@ -63,6 +77,15 @@ def get_settings(request: Request) -> Settings:
 
 def get_client(request: Request) -> genai.Client:
     return request.app.state.client
+
+
+def get_publisher(request: Request) -> EventPublisher:
+    """Wraps the one long-lived Producer in a fresh, cheap EventPublisher
+    per request -- KafkaEventPublisher just holds a reference and a topic
+    string, no connection of its own to construct. Tests override this
+    directly with a fake satisfying the EventPublisher Protocol, rather
+    than faking confluent_kafka.Producer's C-extension interface."""
+    return KafkaEventPublisher(request.app.state.producer)
 
 
 class RouteRequestBody(BaseModel):
@@ -100,6 +123,7 @@ def route_request(
     body: RouteRequestBody,
     settings: Settings = Depends(get_settings),
     client: genai.Client = Depends(get_client),
+    publisher: EventPublisher = Depends(get_publisher),
 ) -> PipelineResult:
     """Run one request through the pipeline and return the full result.
 
@@ -112,7 +136,9 @@ def route_request(
     that -- every request would queue behind whichever one is mid-call.
     """
     try:
-        return run_pipeline(body.text, client=client, settings=settings)
+        return run_pipeline(
+            body.text, client=client, settings=settings, publisher=publisher
+        )
     except EXECUTION_FAILURES as error:
         # EXECUTION_FAILURES is the same tuple pipeline.py uses to decide
         # "was this worth falling back for" -- reused here rather than

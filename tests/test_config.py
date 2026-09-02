@@ -64,6 +64,20 @@ class LoadSettingsTests(unittest.TestCase):
 
         self.assertIn("REQUEST_TIMEOUT_SECONDS", str(caught.exception))
 
+    def test_defaults_kafka_bootstrap_servers(self) -> None:
+        with mock.patch.dict("os.environ", COMPLETE_ENV, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(settings.kafka_bootstrap_servers, "localhost:9092")
+
+    def test_reads_the_kafka_bootstrap_servers_override(self) -> None:
+        env = dict(COMPLETE_ENV, KAFKA_BOOTSTRAP_SERVERS="broker-1:19092")
+
+        with mock.patch.dict("os.environ", env, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(settings.kafka_bootstrap_servers, "broker-1:19092")
+
     def test_accepts_a_timeout_exactly_at_the_floor(self) -> None:
         env = dict(COMPLETE_ENV, REQUEST_TIMEOUT_SECONDS="10")
 
