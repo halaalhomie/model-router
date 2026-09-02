@@ -1,0 +1,91 @@
+# Local infrastructure for Phase 4 (Kafka) and Phase 6 (PostgreSQL), pulled
+# forward from Phase 10 on purpose: Kafka and Postgres are real services, not
+# pip packages, so "learn Kafka" needs something to actually connect to. The
+# app itself is not containerized yet -- it still runs on the host and talks
+# to these over localhost. That container comes in Phase 10.
+#
+# Start:  docker compose up -d
+# Stop:   docker compose stop          (containers kept -- Kafka topics survive)
+#         docker compose down          (containers removed -- Postgres rows
+#                                        still survive, in the named volume;
+#                                        Kafka topics do not, see below)
+# Wipe:   docker compose down -v       (deletes the Postgres volume too)
+
+services:
+  kafka:
+    # Kafka's official image, KRaft mode: Kafka's own metadata layer, built
+    # in since Kafka 4.0. Older tutorials pair Kafka with a separate
+    # Zookeeper container for this -- that dependency no longer exists, so
+    # one container is a complete broker.
+    image: apache/kafka:4.1.2
+    hostname: kafka
+    container_name: model-router-kafka
+    ports:
+      - "9092:9092" # what our Python code (running on the host) connects to
+    environment:
+      KAFKA_NODE_ID: 1
+      # This single node plays both roles KRaft splits out: 'broker' (serves
+      # produce/consume traffic) and 'controller' (owns cluster metadata,
+      # Zookeeper's old job). A production cluster would run these as
+      # separate nodes; combining them is a single-node local-dev shortcut.
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      # Three listeners, three jobs: CONTROLLER is broker-to-broker cluster
+      # metadata (unused with one node, but KRaft still requires it).
+      # PLAINTEXT is how another container on this same compose network
+      # would connect (Phase 10's app container will use this). PLAINTEXT_HOST
+      # is what the advertised address below tells an outside client
+      # (our host-side Python code) to actually connect to.
+      KAFKA_LISTENERS: 'CONTROLLER://:29093,PLAINTEXT_HOST://:9092,PLAINTEXT://:19092'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT_HOST://localhost:9092,PLAINTEXT://kafka:19092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      # PLAINTEXT = no auth, no TLS. Correct for local dev, wrong for
+      # anything shared -- Phase 10's problem, not now.
+      #
+      # An arbitrary opaque ID for this cluster (not a secret -- just an
+      # identifier KRaft uses internally). This is the same fixed value
+      # Apache's own getting-started example uses; fine for a single local
+      # dev cluster nothing else will ever connect to.
+      CLUSTER_ID: '4L6g3nShT-eMCtK--X86sw'
+      # Replication factor 1 = one copy of each partition, no redundancy.
+      # Correct for a single-broker cluster (there is nowhere else to put a
+      # second copy); a real cluster runs these at 3.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+    # No named volume here (deliberately, for now): the image runs as a
+    # non-root user, and a fresh named volume is created root-owned on
+    # Docker Desktop, which the entrypoint can't write into without an
+    # extra ownership-fixing step. Skipping it means `docker compose down`
+    # (removes containers) loses topics; `docker compose stop` (keeps
+    # containers) does not. Fine while we're still learning the CLI --
+    # worth revisiting once real data needs to survive a full teardown.
+
+  postgres:
+    # Not used by any app code until Phase 6 -- brought up now only because
+    # it needs the same Docker Desktop dependency Kafka does, so there is no
+    # reason to make that a second separate setup step later.
+    image: postgres:18
+    container_name: model-router-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      # Postgres 18+ changed convention: the image now expects one mount at
+      # /var/lib/postgresql (not .../data like every older Postgres image)
+      # and manages the version-specific subdirectory itself, to support
+      # pg_upgrade across major versions without a mount-point boundary in
+      # the way. Confirmed by the image's own startup error, not a guess.
+      - postgres-data:/var/lib/postgresql
+
+volumes:
+  postgres-data:
