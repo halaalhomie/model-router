@@ -330,8 +330,8 @@ Phase 1 Basic LLM integration — done
 Phase 2 Intelligent routing — done
 Phase 3 Reliability — done: retries, timeouts, fallback, the FastAPI
          transport, and confidence-aware routing
-Phase 4 Kafka — in progress: infrastructure and the producer are done
-         (one event per request); consumers are next
+Phase 4 Kafka — done: infrastructure, a producer (one event per request),
+         and an analytics consumer that aggregates per-model stats
 Phase 5 Evaluation
 Phase 6 PostgreSQL
 Phase 7 LangChain
