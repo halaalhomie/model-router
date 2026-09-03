@@ -24,6 +24,7 @@ class Settings:
     catalog: ModelCatalog
     request_timeout_seconds: float
     kafka_bootstrap_servers: str
+    kafka_consumer_group: str
 
 
 # Live-measured request times on the configured catalog run 2-19s (see
@@ -34,6 +35,11 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 # Matches docker-compose.yml's PLAINTEXT_HOST listener -- what Kafka is
 # reachable at from the host, not from inside another container.
 DEFAULT_KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
+
+# The consumer group the analytics consumer joins. Kafka tracks committed
+# offsets per group, so changing this name gives you a fresh reader that
+# re-reads the topic from the beginning, independent of the old one.
+DEFAULT_KAFKA_CONSUMER_GROUP = "model-router.analytics"
 
 # Gemini itself rejects a deadline under 10s with a 400 INVALID_ARGUMENT
 # ("Manually set deadline Ns is too short") -- discovered by live testing,
@@ -97,5 +103,8 @@ def load_settings() -> Settings:
         request_timeout_seconds=load_request_timeout_seconds(),
         kafka_bootstrap_servers=optional_str(
             "KAFKA_BOOTSTRAP_SERVERS", DEFAULT_KAFKA_BOOTSTRAP_SERVERS
+        ),
+        kafka_consumer_group=optional_str(
+            "KAFKA_CONSUMER_GROUP", DEFAULT_KAFKA_CONSUMER_GROUP
         ),
     )

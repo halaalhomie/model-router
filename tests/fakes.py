@@ -17,6 +17,7 @@ SETTINGS = Settings(
     ),
     request_timeout_seconds=30.0,
     kafka_bootstrap_servers="localhost:9092",
+    kafka_consumer_group="test-group",
 )
 
 
@@ -99,6 +100,75 @@ class FakeEventPublisher:
         if self.error is not None:
             raise self.error
         self.published.append(result)
+
+
+class FakeKafkaError:
+    """Stands in for confluent_kafka.KafkaError."""
+
+    def __init__(self, code: int) -> None:
+        self._code = code
+
+    def code(self) -> int:
+        return self._code
+
+    def __str__(self) -> str:
+        return f"FakeKafkaError({self._code})"
+
+
+class FakeMessage:
+    """Stands in for confluent_kafka.Message (a C extension type)."""
+
+    def __init__(
+        self,
+        value: bytes | None = None,
+        error: FakeKafkaError | None = None,
+        offset: int = 0,
+        partition: int = 0,
+    ) -> None:
+        self._value = value
+        self._error = error
+        self._offset = offset
+        self._partition = partition
+
+    def value(self) -> bytes | None:
+        return self._value
+
+    def error(self) -> FakeKafkaError | None:
+        return self._error
+
+    def offset(self) -> int:
+        return self._offset
+
+    def partition(self) -> int:
+        return self._partition
+
+
+class FakeKafkaConsumer:
+    """Returns queued poll() results in order and records commits.
+
+    A queued None models "poll timed out with nothing available", which is
+    the normal idle case the real client returns constantly.
+    """
+
+    def __init__(self, messages: list[FakeMessage | None]) -> None:
+        self.messages = list(messages)
+        self.committed: list[FakeMessage] = []
+        self.closed = False
+        self.subscribed: list[str] = []
+
+    def subscribe(self, topics: list[str]) -> None:
+        self.subscribed = topics
+
+    def poll(self, timeout: float) -> FakeMessage | None:
+        if not self.messages:
+            return None
+        return self.messages.pop(0)
+
+    def commit(self, message: FakeMessage, asynchronous: bool = True) -> None:
+        self.committed.append(message)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeKafkaProducer:

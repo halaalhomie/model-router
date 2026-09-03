@@ -25,7 +25,7 @@ easy to confuse:
 import logging
 from typing import Protocol
 
-from confluent_kafka import Producer
+from confluent_kafka import KafkaError, Producer
 
 from app.config import Settings
 from app.schemas import PipelineResult
@@ -33,7 +33,39 @@ from app.schemas import PipelineResult
 
 logger = logging.getLogger(__name__)
 
+# librdkafka's own internal logs go here instead of straight to stderr,
+# so they obey whatever logging configuration the app sets up.
+kafka_internal_logger = logging.getLogger("app.kafka.internal")
+
 REQUEST_EVENTS_TOPIC = "model-router.requests"
+
+
+def log_client_error(error: KafkaError) -> None:
+    """Handle client-level errors, which never surface as exceptions.
+
+    Connection problems don't raise from produce()/poll() -- the client
+    retries in the background forever and reports through this callback
+    instead. Without it, an unreachable broker looks like silence.
+    """
+    if error.code() == KafkaError._ALL_BROKERS_DOWN:
+        logger.warning(
+            "Kafka is unreachable -- retrying in the background. "
+            "Is `docker compose up -d` running?"
+        )
+    else:
+        # Per-connection-attempt detail (_TRANSPORT and friends) is already
+        # logged by librdkafka itself through kafka_internal_logger, so this
+        # stays at debug rather than printing every failure twice.
+        logger.debug("Kafka client error: %s", error)
+
+
+def base_client_config(settings: Settings) -> dict[str, object]:
+    """Config shared by the producer and the consumer."""
+    return {
+        "bootstrap.servers": settings.kafka_bootstrap_servers,
+        "error_cb": log_client_error,
+        "logger": kafka_internal_logger,
+    }
 
 
 class EventPublisher(Protocol):
@@ -66,7 +98,7 @@ class KafkaEventPublisher:
 
 
 def build_producer(settings: Settings) -> Producer:
-    return Producer({"bootstrap.servers": settings.kafka_bootstrap_servers})
+    return Producer(base_client_config(settings))
 
 
 def publish_safely(

@@ -71,6 +71,17 @@ curl -X POST http://127.0.0.1:8000/route -H "Content-Type: application/json" -d 
 Or open http://127.0.0.1:8000/docs for an interactive UI generated
 automatically from the same type hints -- nobody wrote that page by hand.
 
+To watch events arrive, run the analytics consumer in a second terminal
+and then make requests in the first:
+
+```
+venv\Scripts\python.exe -m app.consumer
+```
+
+It prints a line per event and a per-model summary on Ctrl+C. Stopping it
+does not affect the router; restarting it resumes from its last committed
+offset rather than replaying everything.
+
 ## Test
 
 ```
@@ -93,6 +104,8 @@ that needs it, so tests pass fake clients instead (see `tests/fakes.py`).
 | `app/pipeline.py` | Orchestrates analyze -> route -> execute, with fallback |
 | `app/client.py` | Builds the one Gemini client both transports share |
 | `app/events.py` | Publishes one Kafka event per completed request |
+| `app/consumer.py` | Reads those events and aggregates per-model stats |
+| `app/console.py` | Console helpers shared by both CLI entry points |
 | `app/main.py` | CLI adapter over the pipeline |
 | `app/api.py` | HTTP adapter over the pipeline (FastAPI + uvicorn) |
 
@@ -250,14 +263,33 @@ otherwise drop queued messages -- `main.py` after printing the answer, and
 `api.py`'s lifespan shutdown. Calling it per request would convert this
 whole async design back into a synchronous one.
 
-**Delivery semantics.** Today this is at-most-once: `publish_safely()`
-swallows failures, so an event can be lost (Kafka down, or the process
-dies with messages still queued) and is never retried. That is a
-deliberate choice -- telemetry loss is cheaper than failing a user's
-request, and cheaper than the complexity of an outbox table. Moving to
-at-least-once would mean persisting the event locally first and retrying
-delivery, which is a real option once Phase 6 gives us a database to put
-an outbox in.
+**Delivery semantics -- and why the two sides differ.** They are chosen
+independently, and here they are deliberately opposite:
+
+*Producing is at-most-once.* `publish_safely()` swallows failures, so an
+event can be lost (Kafka down, or the process dies with messages still
+queued) and is never retried. Telemetry loss is cheaper than failing a
+user's request, and cheaper than an outbox table. At-least-once producing
+would mean persisting the event locally first and retrying delivery -- a
+real option once Phase 6 provides a database to put an outbox in.
+
+*Consuming is at-least-once.* `app/consumer.py` commits the offset
+**after** processing, so a crash in between redelivers the event rather
+than dropping it. Committing before processing would be at-most-once and
+lose it. The cost is that processing must tolerate duplicates: the
+in-memory counters would double-count, which is fine for a restartable
+local aggregate but is exactly why Phase 6's Postgres writes must be
+idempotent -- upsert on `request_id`, never a blind insert.
+
+**Poison messages.** A malformed event is logged and its offset committed
+past, rather than retried forever. Without that, one bad message blocks
+its partition permanently, because the offset would never advance.
+
+**Client errors are callbacks, not exceptions.** A connection failure
+never raises from `produce()` or `poll()` -- the client retries in the
+background and reports through the `error_cb` both clients configure in
+`base_client_config()`. Without that callback, an unreachable broker
+looks exactly like an idle one.
 
 **Verified end to end**, not just unit-tested: a CLI run and an HTTP
 `POST /route` each produced an event on `model-router.requests` whose

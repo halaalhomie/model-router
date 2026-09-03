@@ -2,6 +2,7 @@ import sys
 
 from app.client import build_client
 from app.config import ConfigurationError, load_settings
+from app.console import use_utf8_stdio
 from app.events import KafkaEventPublisher, build_producer
 from app.pipeline import run_pipeline
 from app.schemas import PipelineResult
@@ -14,18 +15,6 @@ USAGE = 'Usage: python -m app.main "your request here"'
 # this -- and only this -- is where flush() belongs). Bounded so a
 # down/unreachable Kafka delays exit by at most this long, never hangs it.
 KAFKA_FLUSH_TIMEOUT_SECONDS = 5.0
-
-
-def use_utf8(stream: object) -> None:
-    """Force UTF-8 on a console stream.
-
-    Windows consoles default to cp1252, which cannot encode characters that
-    models emit constantly (em dashes, arrows, box drawing). Without this the
-    answer is lost to a UnicodeEncodeError after we have already paid for it.
-    """
-    reconfigure = getattr(stream, "reconfigure", None)
-    if reconfigure is not None:
-        reconfigure(encoding="utf-8", errors="replace")
 
 
 def read_request(argv: list[str]) -> str:
@@ -73,8 +62,7 @@ def format_result(result: PipelineResult) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    use_utf8(sys.stdout)
-    use_utf8(sys.stderr)
+    use_utf8_stdio()
 
     request_text = read_request(sys.argv[1:] if argv is None else argv)
 
