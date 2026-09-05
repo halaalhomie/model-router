@@ -103,6 +103,7 @@ that needs it, so tests pass fake clients instead (see `tests/fakes.py`).
 | `app/retry.py` | Exponential-backoff retry for transient provider errors |
 | `app/pipeline.py` | Orchestrates analyze -> route -> execute, with fallback |
 | `app/client.py` | Builds the one Gemini client both transports share |
+| `app/pricing.py` | Per-model prices, and the cost of one model call |
 | `app/events.py` | Publishes one Kafka event per completed request |
 | `app/consumer.py` | Reads those events and aggregates per-model stats |
 | `app/console.py` | Console helpers shared by both CLI entry points |
@@ -285,6 +286,16 @@ idempotent -- upsert on `request_id`, never a blind insert.
 past, rather than retried forever. Without that, one bad message blocks
 its partition permanently, because the offset would never advance.
 
+**Schema evolution: old events outlive the schema that wrote them.** A
+topic holds a week of history, so events written before a field existed
+are still there to be read. When `estimated_cost_usd` was added, older
+events had no such key -- they still parse, because the field has a
+default of `None`, and the consumer reports them as unpriced rather than
+free. Had the field been required instead, every historical event would
+have started failing validation and been skipped as a poison message.
+New fields on an event schema want a default, for the same reason a
+database migration wants one.
+
 **Client errors are callbacks, not exceptions.** A connection failure
 never raises from `produce()` or `poll()` -- the client retries in the
 background and reports through the `error_cb` both clients configure in
@@ -297,6 +308,48 @@ looks exactly like an idle one.
 `kafka-console-consumer.sh`. With Kafka deliberately stopped, both
 transports still returned complete, correct answers -- only a warning
 line differed.
+
+## Cost
+
+Prices live in `app/pricing.py`, not `.env`: which models to *use* is
+deployment config, what they *cost* is reference data about the models
+themselves, and a price change deserves a diff and a review.
+
+Paid-tier rates per 1M tokens, from
+[Google's pricing page](https://ai.google.dev/gemini-api/docs/pricing)
+(checked 2026-09-05):
+
+| Model | Input | Output |
+| --- | --- | --- |
+| `gemini-3.5-flash-lite` | $0.30 | $2.50 |
+| `gemini-3.5-flash` | $1.50 | $9.00 |
+| `gemini-3.6-flash` | $0.75 | $3.75 |
+| `gemini-3.7-flash` | $0.75 | $3.75 |
+
+**Thinking tokens bill as output.** Google states this explicitly, and it
+is not a rounding detail. A real measured call: 11 in, 613 out, **1124
+thinking** -- billable output is 1737, not 613, so the call costs
+$0.015650 instead of $0.005533. Ignoring thinking tokens would understate
+that request by 65%.
+
+**The reasoning tier is not the priciest tier.** `gemini-3.6-flash`
+($0.75/$3.75) is cheaper per token than `gemini-3.5-flash`
+($1.50/$9.00), even though the router treats it as the heavier tier.
+Capability order and price order are different things -- so "routing hard
+requests to the reasoning model costs more" is an assumption to measure,
+not to accept. A test in `tests/test_pricing.py` pins this down so the
+assumption cannot quietly creep back in.
+
+**Unpriced is not free.** `estimate_cost_usd` returns `None`, never
+`0.0`, for a model missing from `PRICING`. Zero would silently deflate
+every total built on top of it, and an evaluation that undercounts cost
+is worse than one that admits a gap. The consumer counts those requests
+separately and prints `n/a` rather than `0.000000`.
+
+**These are modelled costs, not a bill.** This project's key is
+free-tier, so nothing here was actually charged. That is the right basis
+for comparing routing strategies against each other, but it must not be
+reported as money genuinely spent.
 
 ## Model availability
 
@@ -332,7 +385,9 @@ Phase 3 Reliability — done: retries, timeouts, fallback, the FastAPI
          transport, and confidence-aware routing
 Phase 4 Kafka — done: infrastructure, a producer (one event per request),
          and an analytics consumer that aggregates per-model stats
-Phase 5 Evaluation
+Phase 5 Evaluation — in progress: cost calculation done (the missing
+         input for "does routing save money"); dataset + router-vs-baseline
+         comparison next
 Phase 6 PostgreSQL
 Phase 7 LangChain
 Phase 8 LangGraph

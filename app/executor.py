@@ -1,5 +1,6 @@
 from google import genai
 
+from app.pricing import estimate_cost_usd
 from app.retry import call_with_retry
 from app.schemas import ModelResponse, TokenUsage
 
@@ -24,10 +25,12 @@ def execute_request(
     if not response.text:
         raise ValueError(f"Model {model_name} returned no text.")
 
+    usage = read_usage(response)
     return ModelResponse(
         model_name=model_name,
         text=response.text,
-        usage=read_usage(response),
+        usage=usage,
+        estimated_cost_usd=estimate_cost_usd(model_name, usage),
     )
 
 

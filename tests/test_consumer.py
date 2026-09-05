@@ -22,6 +22,7 @@ def make_result(
     total_tokens: int = 50,
     fallback_used: bool = False,
     confidence: float = 0.9,
+    estimated_cost_usd: float | None = 0.001,
 ) -> PipelineResult:
     return PipelineResult(
         request_id=request_id,
@@ -48,6 +49,7 @@ def make_result(
             ),
             fallback_used=fallback_used,
             original_model="demo-reasoning-model" if fallback_used else None,
+            estimated_cost_usd=estimated_cost_usd,
         ),
         latency_ms=latency_ms,
     )
@@ -111,6 +113,60 @@ class RequestStatsTests(unittest.TestCase):
         stats.record(result)
 
         self.assertEqual(stats.by_model["demo-fast-model"].tokens_total, 0)
+
+    def test_sums_cost_per_model_and_overall(self) -> None:
+        stats = RequestStats()
+
+        stats.record(make_result(served_by="cheap", estimated_cost_usd=0.001))
+        stats.record(make_result(served_by="cheap", estimated_cost_usd=0.002))
+        stats.record(make_result(served_by="dear", estimated_cost_usd=0.05))
+
+        self.assertAlmostEqual(stats.by_model["cheap"].cost_usd_total, 0.003)
+        self.assertAlmostEqual(stats.by_model["dear"].cost_usd_total, 0.05)
+        self.assertAlmostEqual(stats.cost_usd_total, 0.053)
+
+    def test_counts_unpriced_requests_instead_of_treating_them_as_free(
+        self,
+    ) -> None:
+        """A None cost must not deflate the total by counting as zero."""
+        stats = RequestStats()
+
+        stats.record(make_result(served_by="priced", estimated_cost_usd=0.01))
+        stats.record(make_result(served_by="mystery", estimated_cost_usd=None))
+
+        self.assertAlmostEqual(stats.cost_usd_total, 0.01)
+        self.assertEqual(stats.unpriced_requests, 1)
+        self.assertEqual(stats.by_model["mystery"].cost_usd_total, 0.0)
+
+    def test_shows_na_rather_than_zero_for_a_fully_unpriced_model(
+        self,
+    ) -> None:
+        """A 0.000000 in a cost column reads as free, which is exactly the
+        misreading None is meant to prevent."""
+        stats = RequestStats()
+        stats.record(make_result(served_by="mystery", estimated_cost_usd=None))
+
+        self.assertEqual(stats.by_model["mystery"].cost_display, "n/a")
+        self.assertIn("n/a", stats.summary())
+
+    def test_shows_a_number_when_any_request_was_priced(self) -> None:
+        stats = RequestStats()
+        stats.record(make_result(served_by="mixed", estimated_cost_usd=0.01))
+        stats.record(make_result(served_by="mixed", estimated_cost_usd=None))
+
+        self.assertEqual(stats.by_model["mixed"].cost_display, "0.010000")
+
+    def test_summary_flags_unpriced_requests(self) -> None:
+        stats = RequestStats()
+        stats.record(make_result(estimated_cost_usd=None))
+
+        self.assertIn("no pricing", stats.summary())
+
+    def test_summary_omits_the_note_when_everything_is_priced(self) -> None:
+        stats = RequestStats()
+        stats.record(make_result(estimated_cost_usd=0.01))
+
+        self.assertNotIn("no pricing", stats.summary())
 
     def test_summary_lists_each_model(self) -> None:
         stats = RequestStats()

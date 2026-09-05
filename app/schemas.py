@@ -80,6 +80,11 @@ class ModelResponse(BaseModel):
     usage: TokenUsage | None = None
     fallback_used: bool = False
     original_model: str | None = None
+    # None means "could not be priced" (unknown model, or no usage
+    # reported), never "free" -- see app/pricing.py. Stored alongside the
+    # raw token counts rather than derived later, so an event keeps the
+    # cost as calculated at the time even if prices change afterwards.
+    estimated_cost_usd: float | None = None
 
 
 class PipelineResult(BaseModel):

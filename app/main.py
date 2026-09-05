@@ -56,6 +56,13 @@ def format_result(result: PipelineResult) -> str:
             f"{usage.total_tokens} total"
         )
 
+    cost = result.response.estimated_cost_usd
+    if cost is not None:
+        # Six decimals because a flash-lite call lands around $0.00002 --
+        # fewer would round most requests to $0.00 and hide the thing we
+        # are trying to measure.
+        lines.append(f"est. cost    : ${cost:.6f} (paid-tier rates)")
+
     lines.append(f"latency      : {result.latency_ms:.0f} ms")
     lines.extend(["", result.response.text])
     return "\n".join(lines)

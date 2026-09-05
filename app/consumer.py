@@ -53,10 +53,24 @@ class ModelStats:
     requests: int = 0
     latency_ms_total: float = 0.0
     tokens_total: int = 0
+    cost_usd_total: float = 0.0
+    # Requests whose cost could not be determined. Counted rather than
+    # folded into cost_usd_total as zero, so a gap in pricing shows up as
+    # a gap instead of quietly deflating the total.
+    unpriced_requests: int = 0
 
     @property
     def avg_latency_ms(self) -> float:
         return self.latency_ms_total / self.requests if self.requests else 0.0
+
+    @property
+    def cost_display(self) -> str:
+        """"n/a" rather than 0.000000 when nothing here could be priced --
+        a zero in a cost column reads as "this model is free", which is
+        the precise misreading estimate_cost_usd returns None to avoid."""
+        if self.requests and self.unpriced_requests == self.requests:
+            return "n/a"
+        return f"{self.cost_usd_total:.6f}"
 
 
 @dataclass
@@ -76,15 +90,33 @@ class RequestStats:
         if result.response.fallback_used:
             self.fallbacks += 1
 
-        model = self.by_model.setdefault(result.response.model_name, ModelStats())
+        model = self.by_model.setdefault(
+            result.response.model_name, ModelStats()
+        )
         model.requests += 1
         model.latency_ms_total += result.latency_ms
         if result.response.usage is not None:
             model.tokens_total += result.response.usage.total_tokens
 
+        cost = result.response.estimated_cost_usd
+        if cost is None:
+            model.unpriced_requests += 1
+        else:
+            model.cost_usd_total += cost
+
     @property
     def avg_confidence(self) -> float:
         return self.confidence_total / self.total if self.total else 0.0
+
+    @property
+    def cost_usd_total(self) -> float:
+        return sum(stats.cost_usd_total for stats in self.by_model.values())
+
+    @property
+    def unpriced_requests(self) -> int:
+        return sum(
+            stats.unpriced_requests for stats in self.by_model.values()
+        )
 
     @property
     def fallback_rate(self) -> float:
@@ -99,13 +131,22 @@ class RequestStats:
             f"avg confidence : {self.avg_confidence:.2f}",
             f"fallback rate  : {self.fallback_rate:.0%} "
             f"({self.fallbacks}/{self.total})",
+            f"est. cost      : ${self.cost_usd_total:.6f} (paid-tier rates)",
             "",
-            f"{'model':<28} {'reqs':>5} {'avg ms':>9} {'tokens':>8}",
+            f"{'model':<26} {'reqs':>5} {'avg ms':>8} {'tokens':>8} "
+            f"{'cost $':>10}",
         ]
         for name, stats in sorted(self.by_model.items()):
             lines.append(
-                f"{name:<28} {stats.requests:>5} "
-                f"{stats.avg_latency_ms:>9.0f} {stats.tokens_total:>8}"
+                f"{name:<26} {stats.requests:>5} "
+                f"{stats.avg_latency_ms:>8.0f} {stats.tokens_total:>8} "
+                f"{stats.cost_display:>10}"
+            )
+
+        if self.unpriced_requests:
+            lines.append(
+                f"\nNote: {self.unpriced_requests} request(s) had no "
+                f"pricing and are excluded from the cost totals."
             )
         return "\n".join(lines)
 
