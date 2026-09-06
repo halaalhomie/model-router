@@ -104,6 +104,8 @@ that needs it, so tests pass fake clients instead (see `tests/fakes.py`).
 | `app/pipeline.py` | Orchestrates analyze -> route -> execute, with fallback |
 | `app/client.py` | Builds the one Gemini client both transports share |
 | `app/pricing.py` | Per-model prices, and the cost of one model call |
+| `app/usage.py` | Reads token counts off a model response |
+| `app/evaluation.py` | Runs the dataset through router vs. baseline |
 | `app/events.py` | Publishes one Kafka event per completed request |
 | `app/consumer.py` | Reads those events and aggregates per-model stats |
 | `app/console.py` | Console helpers shared by both CLI entry points |
@@ -385,6 +387,70 @@ with no saving at all. How often each case occurs is an empirical
 question about real traffic — which is what the evaluation harness
 exists to answer.
 
+## Evaluation
+
+```
+python -m app.evaluation --dry-run     # what it would run, and how many calls
+python -m app.evaluation --limit 4     # first 4 cases
+python -m app.evaluation               # the whole dataset
+```
+
+`evaluation/dataset-v1.json` is a fixed, versioned set of requests, each
+labelled with the task type the analyzer *should* produce — which is what
+makes routing accuracy measurable rather than assumed. Editing a case
+changes what the numbers mean, so a change belongs in a `v2` file, for
+the same reason model versions are pinned.
+
+Three things make the comparison fair, and each would invalidate it if
+dropped:
+
+1. **Both strategies use the same executor**, so both get identical
+   retries and timeouts. Comparing a careful router against a naive
+   baseline would prove nothing.
+2. **The router's cost includes the classifier.** It pays for a call the
+   baseline never makes.
+3. **The baseline is the honest null hypothesis** — always use the
+   strongest model — i.e. what you would do having never built a router.
+
+Evaluation runs pass no Kafka publisher, so synthetic events never
+pollute the topic that real traffic and the analytics consumer share.
+
+### What the harness found, immediately
+
+Its first real run said routing was **71.9% more expensive** than the
+baseline. The per-case breakdown showed why:
+
+| Case | Routed to | Router | Baseline | Delta |
+| --- | --- | --- | --- | --- |
+| factual-01 | `flash-lite` | $0.000202 | $0.000310 | +0.000108 |
+| factual-02 | `flash-lite` | $0.000267 | $0.000537 | +0.000270 |
+| math-01 | `flash-lite` | $0.000748 | $0.002879 | +0.002131 |
+| **coding-01** | **`3.5-flash`** | **$0.013528** | $0.004852 | **−0.008676** |
+
+Three cases saved $0.0025 between them. One case lost $0.0087 — wiping
+out those savings three and a half times over.
+
+The cause was the pricing quirk documented above: `gemini-3.5-flash`
+($1.50/$9.00) is the **dearest model in the catalog**, dearer than the
+"reasoning" tier it supposedly sits below. Routing a coding request "up"
+to it was a cost regression, not an optimization. The routing policy was
+built on the assumption that higher tier means higher capability *and*
+higher price; only the first half was true.
+
+Pointing the code tier at `gemini-3.6-flash` — cheaper *and* newer —
+flipped the result to **32.1% cheaper**, with `coding-01` landing at
++$0.000021: essentially zero, because it now routes to the same model
+the baseline uses. That is the predicted behaviour, confirmed: routing
+saves nothing on a request it sends to the model the baseline would have
+picked anyway.
+
+**The honest caveat.** This is a cost result on four cases, and cost is
+not quality. Whether `gemini-3.6-flash` writes code as well as
+`gemini-3.5-flash` is untested — a router that always chose the worst
+model would score perfectly on every number above. That gap is the next
+piece of work, and until it exists, read every result here as "cheaper",
+never "better".
+
 ## Model availability
 
 `client.models.list()` is not a reliable guide to what a key can actually call.
@@ -419,9 +485,9 @@ Phase 3 Reliability — done: retries, timeouts, fallback, the FastAPI
          transport, and confidence-aware routing
 Phase 4 Kafka — done: infrastructure, a producer (one event per request),
          and an analytics consumer that aggregates per-model stats
-Phase 5 Evaluation — in progress: cost calculation done (the missing
-         input for "does routing save money"); dataset + router-vs-baseline
-         comparison next
+Phase 5 Evaluation — in progress: cost calculation, a versioned dataset,
+         and a router-vs-baseline harness are done; response quality
+         (LLM-as-judge) is the remaining gap
 Phase 6 PostgreSQL
 Phase 7 LangChain
 Phase 8 LangGraph

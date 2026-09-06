@@ -1,0 +1,76 @@
+{
+  "name": "routing-eval",
+  "version": 1,
+  "notes": [
+    "A fixed set of requests, so two runs are comparable. Editing a case",
+    "changes what the numbers mean -- add a v2 file rather than revising",
+    "this one, for the same reason model versions are pinned.",
+    "expected_task_type is the label the analyzer should produce, which is",
+    "what makes routing accuracy measurable rather than assumed.",
+    "Cases deliberately vary in expected answer length: routing overhead is",
+    "a fixed floor, so short answers are where routing is least likely to",
+    "pay for itself."
+  ],
+  "cases": [
+    {
+      "id": "factual-01",
+      "text": "What is the capital of Denmark?",
+      "expected_task_type": "factual",
+      "note": "Tiny answer -- below or near the routing break-even."
+    },
+    {
+      "id": "factual-02",
+      "text": "In what year did the Apollo 11 mission land on the Moon?",
+      "expected_task_type": "factual",
+      "note": "Tiny answer."
+    },
+    {
+      "id": "math-01",
+      "text": "A train travels 240 km in 3 hours, then 180 km in 2 hours. What is its average speed for the whole journey? Show your working.",
+      "expected_task_type": "math",
+      "note": "Short but requires steps."
+    },
+    {
+      "id": "coding-01",
+      "text": "Write a Python function that merges two sorted lists into one sorted list, without using sorted().",
+      "expected_task_type": "coding",
+      "note": "Medium-length code answer."
+    },
+    {
+      "id": "coding-02",
+      "text": "Write a Python decorator that retries a function with exponential backoff, and explain each part.",
+      "expected_task_type": "coding",
+      "note": "Long code answer, well past break-even."
+    },
+    {
+      "id": "summarization-01",
+      "text": "Summarize in three sentences why message queues decouple producers from consumers.",
+      "expected_task_type": "summarization",
+      "note": "Bounded-length answer."
+    },
+    {
+      "id": "reasoning-01",
+      "text": "A server's p99 latency rose sharply while its average stayed flat. What does that imply about the distribution, and what would you investigate first?",
+      "expected_task_type": "reasoning",
+      "note": "Genuinely needs reasoning."
+    },
+    {
+      "id": "planning-01",
+      "text": "Outline a strategy for migrating a monolithic application to microservices without downtime.",
+      "expected_task_type": "planning",
+      "note": "Long answer."
+    },
+    {
+      "id": "translation-01",
+      "text": "Translate this sentence into French: 'The router chooses the cheapest model that can do the job.'",
+      "expected_task_type": "translation",
+      "note": "Very short answer."
+    },
+    {
+      "id": "extraction-01",
+      "text": "Extract the name, port and protocol from this line as JSON: 'kafka-broker listening on 9092 over PLAINTEXT'.",
+      "expected_task_type": "information_extraction",
+      "note": "Short structured answer."
+    }
+  ]
+}
