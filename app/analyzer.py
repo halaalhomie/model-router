@@ -1,8 +1,10 @@
 from google import genai
 from google.genai import types
 
+from app.pricing import estimate_cost_usd
 from app.retry import call_with_retry
-from app.schemas import TaskProfile
+from app.schemas import AnalysisResult, TaskProfile
+from app.usage import read_usage
 
 
 ANALYSIS_INSTRUCTIONS = """
@@ -21,8 +23,8 @@ def analyze_task(
     *,
     client: genai.Client,
     model_name: str,
-) -> TaskProfile:
-    """Classify one user request into a validated TaskProfile."""
+) -> AnalysisResult:
+    """Classify one request, reporting what the classification cost."""
     if not request_text.strip():
         raise ValueError("request_text must not be empty.")
 
@@ -40,4 +42,10 @@ def analyze_task(
     if not response.text:
         raise ValueError("The task analyzer returned no text.")
 
-    return TaskProfile.model_validate_json(response.text)
+    usage = read_usage(response)
+    return AnalysisResult(
+        profile=TaskProfile.model_validate_json(response.text),
+        model_name=model_name,
+        usage=usage,
+        estimated_cost_usd=estimate_cost_usd(model_name, usage),
+    )

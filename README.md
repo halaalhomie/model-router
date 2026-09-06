@@ -351,6 +351,40 @@ free-tier, so nothing here was actually charged. That is the right basis
 for comparing routing strategies against each other, but it must not be
 reported as money genuinely spent.
 
+### Routing overhead, and where it breaks even
+
+The classifier runs on every request, so **what routing costs is part of
+what routing costs you**. `PipelineResult` therefore reports both halves
+separately, and `total_cost_usd` is the only number fair to compare
+against a baseline that never classifies anything.
+
+The overhead is not small. Measured on a trivial factual request:
+
+| | Tokens | Cost |
+| --- | --- | --- |
+| Classification | 99 in / 61 out | `$0.000182` |
+| Answering | 8 in / 7 out | `$0.000020` |
+| **Total** | | **`$0.000202`** |
+
+**90% of that request's cost was deciding who should answer it.** The
+classifier's prompt and its JSON reply together dwarf a seven-token
+answer.
+
+Read alone, that number indicts the whole idea. It shouldn't, and the
+arithmetic says why: the overhead is a *fixed floor*, and the saving
+grows with output length. Against always using `gemini-3.5-flash`, with
+a 100-token prompt, routing to `flash-lite` breaks even at **9.5 output
+tokens** — and wins by ~$0.0019 on a 300-token answer, ~$0.0064 on a
+1000-token one.
+
+So the honest claim is narrower than "routing saves money": routing
+saves money on any request whose answer is longer than about ten tokens,
+**and** which the router actually downgrades. On a request it routes to
+the same model the baseline would have used, routing is pure overhead
+with no saving at all. How often each case occurs is an empirical
+question about real traffic — which is what the evaluation harness
+exists to answer.
+
 ## Model availability
 
 `client.models.list()` is not a reliable guide to what a key can actually call.

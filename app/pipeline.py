@@ -47,11 +47,12 @@ def run_pipeline(
     request_id = str(uuid.uuid4())
     started_at = time.perf_counter()
 
-    profile = analyze_task(
+    analysis = analyze_task(
         request_text,
         client=client,
         model_name=settings.analyzer_model,
     )
+    profile = analysis.profile
 
     decision = select_model(profile, settings.catalog)
 
@@ -81,6 +82,9 @@ def run_pipeline(
         decision=decision,
         response=response,
         latency_ms=(time.perf_counter() - started_at) * 1000,
+        analyzer_model=analysis.model_name,
+        analyzer_usage=analysis.usage,
+        analyzer_cost_usd=analysis.estimated_cost_usd,
     )
 
     publish_safely(publisher, result)

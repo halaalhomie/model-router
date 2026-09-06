@@ -2,7 +2,8 @@ from google import genai
 
 from app.pricing import estimate_cost_usd
 from app.retry import call_with_retry
-from app.schemas import ModelResponse, TokenUsage
+from app.schemas import ModelResponse
+from app.usage import read_usage
 
 
 def execute_request(
@@ -31,18 +32,4 @@ def execute_request(
         text=response.text,
         usage=usage,
         estimated_cost_usd=estimate_cost_usd(model_name, usage),
-    )
-
-
-def read_usage(response: object) -> TokenUsage | None:
-    """Read token counts defensively: usage metadata is not always present."""
-    metadata = getattr(response, "usage_metadata", None)
-    if metadata is None:
-        return None
-
-    return TokenUsage(
-        prompt_tokens=getattr(metadata, "prompt_token_count", None) or 0,
-        output_tokens=getattr(metadata, "candidates_token_count", None) or 0,
-        thinking_tokens=getattr(metadata, "thoughts_token_count", None) or 0,
-        total_tokens=getattr(metadata, "total_token_count", None) or 0,
     )

@@ -87,6 +87,20 @@ class ModelResponse(BaseModel):
     estimated_cost_usd: float | None = None
 
 
+class AnalysisResult(BaseModel):
+    """The classifier's verdict, plus what the classification itself cost.
+
+    The router pays for this call on every request; a baseline that always
+    uses one model does not. Discarding its cost would make any comparison
+    between them flatter the router by exactly this much.
+    """
+
+    profile: TaskProfile
+    model_name: str
+    usage: TokenUsage | None = None
+    estimated_cost_usd: float | None = None
+
+
 class PipelineResult(BaseModel):
     """Everything one request produced, from classification to final reply.
 
@@ -94,6 +108,11 @@ class PipelineResult(BaseModel):
     own logic: request_id is what a Kafka event, and later a Postgres row,
     correlates back to one request; latency_ms is the first real evaluation
     metric this project collects.
+
+    Cost is split in two on purpose. response.estimated_cost_usd is what
+    answering cost; analyzer_cost_usd is the routing overhead paid to decide
+    who should answer. total_cost_usd adds them, and only that total is a
+    fair number to compare against a non-routing baseline.
     """
 
     request_id: str
@@ -102,3 +121,22 @@ class PipelineResult(BaseModel):
     decision: RoutingDecision
     response: ModelResponse
     latency_ms: float
+    # Added after events were already in the topic, so both default --
+    # older events parse as "analyzer cost unknown" instead of failing.
+    analyzer_model: str | None = None
+    analyzer_usage: TokenUsage | None = None
+    analyzer_cost_usd: float | None = None
+
+    @property
+    def total_cost_usd(self) -> float | None:
+        """Classification plus execution, or None if either is unpriced.
+
+        None rather than a partial sum: a total missing one of its two
+        components is not a smaller total, it is an unknown one, and
+        reporting it as a number invites exactly the undercount that
+        estimate_cost_usd returns None to prevent.
+        """
+        answering = self.response.estimated_cost_usd
+        if answering is None or self.analyzer_cost_usd is None:
+            return None
+        return answering + self.analyzer_cost_usd

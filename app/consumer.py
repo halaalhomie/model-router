@@ -83,6 +83,11 @@ class RequestStats:
     fallbacks: int = 0
     confidence_total: float = 0.0
     by_model: dict[str, ModelStats] = field(default_factory=dict)
+    # Routing overhead: what the classifier cost, tracked apart from the
+    # models that did the answering. It belongs to no one model, and it is
+    # the price the router pays that a single-model baseline does not.
+    analyzer_cost_usd_total: float = 0.0
+    analyzer_unpriced: int = 0
 
     def record(self, result: PipelineResult) -> None:
         self.total += 1
@@ -104,13 +109,23 @@ class RequestStats:
         else:
             model.cost_usd_total += cost
 
+        if result.analyzer_cost_usd is None:
+            self.analyzer_unpriced += 1
+        else:
+            self.analyzer_cost_usd_total += result.analyzer_cost_usd
+
     @property
     def avg_confidence(self) -> float:
         return self.confidence_total / self.total if self.total else 0.0
 
     @property
-    def cost_usd_total(self) -> float:
+    def answering_cost_usd_total(self) -> float:
         return sum(stats.cost_usd_total for stats in self.by_model.values())
+
+    @property
+    def cost_usd_total(self) -> float:
+        """Everything the router spent: answering plus routing overhead."""
+        return self.answering_cost_usd_total + self.analyzer_cost_usd_total
 
     @property
     def unpriced_requests(self) -> int:
@@ -131,7 +146,9 @@ class RequestStats:
             f"avg confidence : {self.avg_confidence:.2f}",
             f"fallback rate  : {self.fallback_rate:.0%} "
             f"({self.fallbacks}/{self.total})",
-            f"est. cost      : ${self.cost_usd_total:.6f} (paid-tier rates)",
+            f"est. cost      : ${self.cost_usd_total:.6f} "
+            f"(${self.analyzer_cost_usd_total:.6f} routing + "
+            f"${self.answering_cost_usd_total:.6f} answering)",
             "",
             f"{'model':<26} {'reqs':>5} {'avg ms':>8} {'tokens':>8} "
             f"{'cost $':>10}",

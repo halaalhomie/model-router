@@ -23,6 +23,7 @@ def make_result(
     fallback_used: bool = False,
     confidence: float = 0.9,
     estimated_cost_usd: float | None = 0.001,
+    analyzer_cost: float | None = 0.0001,
 ) -> PipelineResult:
     return PipelineResult(
         request_id=request_id,
@@ -52,6 +53,7 @@ def make_result(
             estimated_cost_usd=estimated_cost_usd,
         ),
         latency_ms=latency_ms,
+        analyzer_cost_usd=analyzer_cost,
     )
 
 
@@ -123,7 +125,41 @@ class RequestStatsTests(unittest.TestCase):
 
         self.assertAlmostEqual(stats.by_model["cheap"].cost_usd_total, 0.003)
         self.assertAlmostEqual(stats.by_model["dear"].cost_usd_total, 0.05)
-        self.assertAlmostEqual(stats.cost_usd_total, 0.053)
+        self.assertAlmostEqual(stats.answering_cost_usd_total, 0.053)
+        # cost_usd_total also carries three classifier calls at 0.0001
+        self.assertAlmostEqual(stats.cost_usd_total, 0.0533)
+
+    def test_tracks_routing_overhead_apart_from_answering(self) -> None:
+        """The classifier's cost belongs to no single model, and it is
+        exactly the overhead a single-model baseline never pays."""
+        stats = RequestStats()
+
+        stats.record(
+            make_result(
+                served_by="fast", estimated_cost_usd=0.01, analyzer_cost=0.002
+            )
+        )
+        stats.record(
+            make_result(
+                served_by="fast", estimated_cost_usd=0.01, analyzer_cost=0.002
+            )
+        )
+
+        self.assertAlmostEqual(stats.answering_cost_usd_total, 0.02)
+        self.assertAlmostEqual(stats.analyzer_cost_usd_total, 0.004)
+        self.assertAlmostEqual(stats.cost_usd_total, 0.024)
+        self.assertNotIn(
+            0.002, [s.cost_usd_total for s in stats.by_model.values()]
+        )
+
+    def test_counts_unpriced_analyzer_calls_separately(self) -> None:
+        stats = RequestStats()
+
+        stats.record(make_result(estimated_cost_usd=0.01, analyzer_cost=None))
+
+        self.assertEqual(stats.analyzer_unpriced, 1)
+        self.assertAlmostEqual(stats.analyzer_cost_usd_total, 0.0)
+        self.assertAlmostEqual(stats.cost_usd_total, 0.01)
 
     def test_counts_unpriced_requests_instead_of_treating_them_as_free(
         self,
@@ -131,8 +167,16 @@ class RequestStatsTests(unittest.TestCase):
         """A None cost must not deflate the total by counting as zero."""
         stats = RequestStats()
 
-        stats.record(make_result(served_by="priced", estimated_cost_usd=0.01))
-        stats.record(make_result(served_by="mystery", estimated_cost_usd=None))
+        stats.record(
+            make_result(
+                served_by="priced", estimated_cost_usd=0.01, analyzer_cost=None
+            )
+        )
+        stats.record(
+            make_result(
+                served_by="mystery", estimated_cost_usd=None, analyzer_cost=None
+            )
+        )
 
         self.assertAlmostEqual(stats.cost_usd_total, 0.01)
         self.assertEqual(stats.unpriced_requests, 1)

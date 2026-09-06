@@ -1,8 +1,15 @@
 import unittest
+from dataclasses import replace
 
 from google.genai import errors
 
 from app.pipeline import run_pipeline
+from app.schemas import (
+    ModelResponse,
+    PipelineResult,
+    RoutingDecision,
+    TaskProfile,
+)
 from tests.fakes import (
     SETTINGS,
     FakeEventPublisher,
@@ -11,6 +18,31 @@ from tests.fakes import (
     ScriptedClient,
     profile_json,
 )
+
+
+def make_priced_result(
+    *, analyzer: float | None, answering: float | None
+) -> PipelineResult:
+    """A PipelineResult with only the two cost components set, for
+    exercising total_cost_usd without running the pipeline."""
+    return PipelineResult(
+        request_id="req-cost",
+        request_text="Say hello.",
+        profile=TaskProfile(
+            task_type="general",
+            difficulty="low",
+            reasoning_required="low",
+            context_size="small",
+            output_type="text",
+            confidence=0.9,
+        ),
+        decision=RoutingDecision(model_name="m", reason="because"),
+        response=ModelResponse(
+            model_name="m", text="hi", estimated_cost_usd=answering
+        ),
+        latency_ms=1.0,
+        analyzer_cost_usd=analyzer,
+    )
 
 
 class RunPipelineTests(unittest.TestCase):
@@ -213,6 +245,43 @@ class PipelineTelemetryTests(unittest.TestCase):
 
         self.assertTrue(first.request_id)
         self.assertNotEqual(first.request_id, second.request_id)
+
+    def test_records_what_the_classifier_cost(self) -> None:
+        """Routing overhead is a real cost a single-model baseline never
+        pays, so the pipeline has to carry it, not discard it."""
+        client = ScriptedClient(
+            [
+                FakeResponse(profile_json(), FakeUsage(100_000, 100_000)),
+                FakeResponse("Answer.", FakeUsage(10, 10)),
+            ]
+        )
+        settings = replace(SETTINGS, analyzer_model="gemini-3.5-flash-lite")
+
+        result = run_pipeline(
+            "Say hello.",
+            client=client,  # type: ignore[arg-type]
+            settings=settings,
+        )
+
+        self.assertEqual(result.analyzer_model, "gemini-3.5-flash-lite")
+        assert result.analyzer_usage is not None
+        self.assertEqual(result.analyzer_usage.prompt_tokens, 100_000)
+        self.assertAlmostEqual(result.analyzer_cost_usd, 0.28)
+
+    def test_total_cost_adds_routing_to_answering(self) -> None:
+        result = make_priced_result(analyzer=0.001, answering=0.01)
+
+        self.assertAlmostEqual(result.total_cost_usd, 0.011)
+
+    def test_total_cost_is_unknown_when_either_half_is(self) -> None:
+        """A total missing one component is not a smaller total, it is an
+        unknown one -- the same reasoning as estimate_cost_usd."""
+        self.assertIsNone(
+            make_priced_result(analyzer=None, answering=0.01).total_cost_usd
+        )
+        self.assertIsNone(
+            make_priced_result(analyzer=0.001, answering=None).total_cost_usd
+        )
 
     def test_records_latency(self) -> None:
         result = run_pipeline(
