@@ -38,6 +38,15 @@ from app.client import build_client
 from app.config import ConfigurationError, Settings, load_settings
 from app.console import use_utf8_stdio
 from app.executor import execute_request
+from app.judge import (
+    INCONSISTENT,
+    TIE,
+    QualityOutcome,
+    QualitySummary,
+    judge_pair,
+)
+from app.judge import BASELINE as JUDGE_BASELINE
+from app.judge import ROUTER as JUDGE_ROUTER
 from app.pipeline import EXECUTION_FAILURES, run_pipeline
 from app.schemas import TaskType
 
@@ -77,6 +86,8 @@ class CaseOutcome:
     cost_usd: float | None = None
     latency_ms: float = 0.0
     error: str | None = None
+    # Kept so the judge can compare the two answers; not otherwise used.
+    answer_text: str | None = None
     # Router only: what the classifier said, and whether fallback fired.
     predicted_task_type: str | None = None
     expected_task_type: str | None = None
@@ -179,6 +190,7 @@ def run_router_case(
         model_name=result.response.model_name,
         cost_usd=result.total_cost_usd,
         latency_ms=result.latency_ms,
+        answer_text=result.response.text,
         predicted_task_type=result.profile.task_type,
         expected_task_type=case.expected_task_type,
         fallback_used=result.response.fallback_used,
@@ -216,8 +228,106 @@ def run_baseline_case(
         model_name=response.model_name,
         cost_usd=response.estimated_cost_usd,
         latency_ms=(time.perf_counter() - started) * 1000,
+        answer_text=response.text,
         expected_task_type=case.expected_task_type,
     )
+
+
+def judge_run(
+    dataset: Dataset,
+    router: StrategySummary,
+    baseline: StrategySummary,
+    *,
+    client: genai.Client,
+    model_name: str,
+    on_progress: object = None,
+    delay: float = 0.0,
+    sleep: object = time.sleep,
+) -> QualitySummary:
+    """Judge every case where both strategies actually produced an answer.
+
+    A case only one strategy answered has nothing to compare, so it is
+    skipped rather than scored as a win for whoever survived.
+    """
+    router_by_case = {o.case_id: o for o in router.outcomes}
+    baseline_by_case = {o.case_id: o for o in baseline.outcomes}
+
+    outcomes: list[QualityOutcome] = []
+    for case in dataset.cases:
+        routed = router_by_case.get(case.id)
+        base = baseline_by_case.get(case.id)
+        if not (routed and base and routed.ok and base.ok):
+            continue
+        if not (routed.answer_text and base.answer_text):
+            continue
+
+        if outcomes and delay:
+            sleep(delay)
+        if on_progress is not None:
+            on_progress(case)
+        outcomes.append(
+            judge_pair(
+                case.id,
+                case.text,
+                routed.answer_text,
+                base.answer_text,
+                client=client,
+                model_name=model_name,
+            )
+        )
+
+    return QualitySummary(outcomes)
+
+
+def format_quality(quality: QualitySummary, judge_model: str) -> str:
+    if not quality.outcomes:
+        return "No pairs could be judged."
+
+    total = len(quality.outcomes)
+    lines = [
+        f"Judge        : {judge_model} (each pair judged twice, "
+        f"orders swapped)",
+        "",
+        f"  router better    {quality.count(JUDGE_ROUTER):>3} / {total}",
+        f"  baseline better  {quality.count(JUDGE_BASELINE):>3} / {total}",
+        f"  tie              {quality.count(TIE):>3} / {total}",
+        f"  inconsistent     {quality.count(INCONSISTENT):>3} / {total}"
+        f"   (judge changed its mind when the order flipped)",
+    ]
+
+    consistency = quality.consistency
+    if consistency is not None:
+        lines.append("")
+        lines.append(f"  order-consistency {consistency:.0%}")
+        if consistency < 0.7:
+            lines.append(
+                "  Low consistency: these verdicts are largely noise, "
+                "not a quality signal."
+            )
+
+    gap = quality.verbosity_gap
+    if gap is not None:
+        lines.append(
+            f"  length gap        {gap:+.0f} chars "
+            f"(router minus baseline)"
+        )
+
+    lines.append(f"  judging cost      {money(quality.total_cost_usd)}")
+
+    decided = [
+        o
+        for o in quality.outcomes
+        if o.result in (JUDGE_ROUTER, JUDGE_BASELINE)
+    ]
+    if decided:
+        lines.extend(["", "  Decided pairs:"])
+        for outcome in decided:
+            lines.append(
+                f"    {outcome.case_id:<18} {outcome.result:<9} "
+                f"{outcome.reason[:70]}"
+            )
+
+    return "\n".join(lines)
 
 
 def money(value: float | None) -> str:
@@ -332,11 +442,15 @@ def evaluate(
     settings: Settings,
     baseline_model: str,
     on_progress: object = None,
+    delay: float = 0.0,
+    sleep: object = time.sleep,
 ) -> tuple[StrategySummary, StrategySummary]:
     router = StrategySummary(ROUTER)
     baseline = StrategySummary(BASELINE)
 
-    for case in dataset.cases:
+    for index, case in enumerate(dataset.cases):
+        if index and delay:
+            sleep(delay)
         if on_progress is not None:
             on_progress(case)
         router.outcomes.append(
@@ -366,11 +480,41 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Defaults to the catalog's reasoning model (the strongest tier).",
     )
     parser.add_argument(
+        "--judge",
+        action="store_true",
+        help=(
+            "Also judge answer quality, router vs baseline. Costs two extra "
+            "calls per case (each pair is judged in both orders)."
+        ),
+    )
+    parser.add_argument(
+        "--judge-model",
+        default=None,
+        help="Defaults to the baseline model, the strongest tier available.",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds to pause between cases. The free tier allows only 5 "
+            "requests per minute per model, and a judged case spends about "
+            "three on the baseline model alone. Pacing beats colliding with "
+            "the quota and waiting out the retry."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would run, and how many API calls it costs, then stop.",
     )
     return parser.parse_args(argv)
+
+
+def planned_calls(case_count: int, *, judging: bool) -> int:
+    """Two calls per case on the router path (classify, execute), one on
+    the baseline, plus two more per case when judging both orderings."""
+    return case_count * (5 if judging else 3)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -390,23 +534,23 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     baseline_model = args.baseline_model or settings.catalog.reasoning_model
+    judge_model = args.judge_model or baseline_model
+    calls = planned_calls(len(dataset.cases), judging=args.judge)
 
     if args.dry_run:
-        # Each case costs two calls on the router path (classify, execute)
-        # and one on the baseline. Worth stating before spending it.
+        # Worth stating what a run costs before spending it.
         print(f"Dataset      : {dataset.label}")
         print(f"Cases        : {len(dataset.cases)}")
         print(f"Baseline     : always {baseline_model}")
-        print(f"API calls    : {len(dataset.cases) * 3} "
-              f"({len(dataset.cases)} classify + "
-              f"{len(dataset.cases)} routed + "
-              f"{len(dataset.cases)} baseline)")
+        if args.judge:
+            print(f"Judge        : {judge_model}")
+        print(f"API calls    : {calls}")
         return 0
 
     client = build_client(settings)
     print(
         f"Running {dataset.label}: {len(dataset.cases)} cases, "
-        f"{len(dataset.cases) * 3} API calls.\n"
+        f"{calls} API calls.\n"
     )
 
     router, baseline = evaluate(
@@ -415,10 +559,30 @@ def main(argv: list[str] | None = None) -> int:
         settings=settings,
         baseline_model=baseline_model,
         on_progress=lambda case: print(f"  {case.id} ...", flush=True),
+        delay=args.delay,
     )
 
     print()
     print(format_report(dataset, router, baseline, baseline_model))
+
+    if args.judge:
+        print("\nJudging answer quality ...")
+        quality = judge_run(
+            dataset,
+            router,
+            baseline,
+            client=client,
+            model_name=judge_model,
+            on_progress=lambda case: print(f"  {case.id} ...", flush=True),
+            delay=args.delay,
+        )
+        print()
+        print(format_quality(quality, judge_model))
+        print(
+            "\nThe judge is the same model family as the answers it grades, "
+            "so it is not a neutral referee. See app/judge.py."
+        )
+
     return 0
 
 

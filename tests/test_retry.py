@@ -3,7 +3,62 @@ import unittest
 import httpx2
 from google.genai import errors
 
-from app.retry import call_with_retry, is_retryable
+from app.retry import (
+    MAX_RETRY_DELAY_SECONDS,
+    call_with_retry,
+    is_retryable,
+    retry_after_seconds,
+)
+
+
+def rate_limit_error(delay_seconds: float) -> errors.ClientError:
+    """A 429 carrying the google.rpc.RetryInfo hint Gemini really sends."""
+    return errors.ClientError(
+        429,
+        {
+            "error": {
+                "code": 429,
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {"@type": "type.googleapis.com/google.rpc.Help"},
+                    {
+                        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                        "retryDelay": f"{delay_seconds}s",
+                    },
+                ],
+            }
+        },
+    )
+
+
+class RetryAfterTests(unittest.TestCase):
+    def test_reads_the_hint_from_a_real_shaped_429(self) -> None:
+        self.assertAlmostEqual(retry_after_seconds(rate_limit_error(56.08)), 56.08)
+
+    def test_returns_none_when_there_is_no_hint(self) -> None:
+        plain = errors.ClientError(429, {"error": {"code": 429}})
+
+        self.assertIsNone(retry_after_seconds(plain))
+
+    def test_returns_none_for_an_error_without_details(self) -> None:
+        self.assertIsNone(retry_after_seconds(ValueError("nope")))
+
+    def test_ignores_a_malformed_delay(self) -> None:
+        bad = errors.ClientError(
+            429,
+            {
+                "error": {
+                    "details": [
+                        {
+                            "@type": ".../google.rpc.RetryInfo",
+                            "retryDelay": "soon",
+                        }
+                    ]
+                }
+            },
+        )
+
+        self.assertIsNone(retry_after_seconds(bad))
 
 
 def server_error(code: int = 504) -> errors.ServerError:
@@ -83,6 +138,50 @@ class CallWithRetryTests(unittest.TestCase):
 
         self.assertEqual(calls, 3)
         self.assertEqual(caught.exception.code, 429)
+
+    def test_honours_the_servers_retry_hint_over_our_backoff(self) -> None:
+        """A per-minute quota tells us exactly how long to wait. Backing
+        off 1s against a 56s hint just fails again."""
+        delays: list[float] = []
+
+        def rate_limited() -> str:
+            raise rate_limit_error(56.0)
+
+        with self.assertRaises(errors.ClientError):
+            call_with_retry(
+                rate_limited, max_attempts=2, sleep=delays.append
+            )
+
+        self.assertEqual(delays, [56.0])
+
+    def test_caps_an_unreasonably_long_hint(self) -> None:
+        """A hint far beyond the request's lifetime means the quota will
+        not clear in time; failing fast beats hanging on."""
+        delays: list[float] = []
+
+        def rate_limited() -> str:
+            raise rate_limit_error(3600.0)
+
+        with self.assertRaises(errors.ClientError):
+            call_with_retry(
+                rate_limited, max_attempts=2, sleep=delays.append
+            )
+
+        self.assertEqual(delays, [MAX_RETRY_DELAY_SECONDS])
+
+    def test_a_tiny_hint_does_not_shorten_the_backoff(self) -> None:
+        delays: list[float] = []
+
+        def rate_limited() -> str:
+            raise rate_limit_error(0.1)
+
+        with self.assertRaises(errors.ClientError):
+            call_with_retry(
+                rate_limited, max_attempts=2, base_delay=5.0,
+                sleep=delays.append,
+            )
+
+        self.assertEqual(delays, [5.0])
 
     def test_backs_off_exponentially_between_attempts(self) -> None:
         delays: list[float] = []

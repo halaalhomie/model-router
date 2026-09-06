@@ -106,6 +106,7 @@ that needs it, so tests pass fake clients instead (see `tests/fakes.py`).
 | `app/pricing.py` | Per-model prices, and the cost of one model call |
 | `app/usage.py` | Reads token counts off a model response |
 | `app/evaluation.py` | Runs the dataset through router vs. baseline |
+| `app/judge.py` | Pairwise quality judging, with position-bias control |
 | `app/events.py` | Publishes one Kafka event per completed request |
 | `app/consumer.py` | Reads those events and aggregates per-model stats |
 | `app/console.py` | Console helpers shared by both CLI entry points |
@@ -136,8 +137,13 @@ route, or execute.
 would change the underlying model without warning, which would invalidate any
 historical evaluation metrics collected against it.
 
-**What retries, and what falls back?** `app/retry.py` retries one call (with
-exponential backoff) on 5xx errors, 429 rate limits, and network timeouts --
+**What retries, and what falls back?** `app/retry.py` retries one call on
+5xx errors, 429 rate limits, and network timeouts. It backs off
+exponentially *unless* the server said how long to wait: a Gemini 429
+carries a `RetryInfo` hint, and honouring it beats guessing 1s against a
+per-minute quota. Hints beyond 75s are capped, since a quota that will
+not clear inside the request's lifetime is better failed than waited on.
+The retryable set is 5xx, 429, and network errors --
 failures worth waiting out. A 400/404 is a defect in the request itself, so it
 is not retried; retrying it three times would only waste the timeout budget on
 an outcome that was never in doubt. If the *routed* model still fails after its
@@ -445,11 +451,87 @@ saves nothing on a request it sends to the model the baseline would have
 picked anyway.
 
 **The honest caveat.** This is a cost result on four cases, and cost is
-not quality. Whether `gemini-3.6-flash` writes code as well as
-`gemini-3.5-flash` is untested — a router that always chose the worst
-model would score perfectly on every number above. That gap is the next
-piece of work, and until it exists, read every result here as "cheaper",
-never "better".
+not quality. A router that always chose the worst model would score
+perfectly on every number above. Closing that gap is what the judge
+below is for.
+
+### Judging quality
+
+```
+python -m app.evaluation --limit 3 --judge --delay 20
+```
+
+`app/judge.py` asks a model which of two answers better serves the
+request. Three design choices carry it:
+
+**Pairwise, not a 1–5 score.** The question is comparative, and LLM
+judges are markedly more reliable choosing between two answers than
+assigning an absolute score, which drifts between runs and skews
+lenient.
+
+**Every pair is judged twice, orders swapped.** Judges favour whichever
+answer they see first, independent of content. Requiring both passes to
+agree turns that bias from a silent thumb on the scale into a visible
+disagreement, reported as `inconsistent` rather than resolved by a coin
+flip. The reported `order-consistency` is how often the judge survived
+its own swap — if that number is low, the verdicts are noise and the
+report says so.
+
+**The judge is blind** to which model wrote which answer.
+
+Two biases this does *not* solve, and which belong beside every result:
+**self-preference** — the judge is the same model family as the answers
+it grades, and escaping that needs a different provider than this key can
+reach — and **verbosity**, partly mitigated by instructing the judge to
+ignore length, and made detectable by reporting the mean length gap.
+
+First judged run, two factual cases, baseline `gemini-3.5-flash`, judge
+`gemini-3.5-flash-lite`:
+
+| | Result |
+| --- | --- |
+| Cost | routing **78.7% cheaper** ($0.000469 vs $0.002205) |
+| Quality | **2 ties, 0 wins either way** |
+| Order-consistency | **100%** |
+| Length gap | −2 chars |
+| Judging cost | **$0.000528** |
+
+So on these two cases routing was much cheaper and the judge — steady
+across both orderings, with no length advantage to explain it away —
+found nothing to choose between the answers. That is the first result
+here that supports the project's claim with a quality control attached.
+
+Read it narrowly. Two trivial factual questions ("What is the capital of
+Denmark?") are the easiest possible case for a cheap model, and a tie is
+the expected outcome when there is one short correct answer. The
+interesting cases — coding, reasoning — went untested because the daily
+quota ran out, see below.
+
+**Judging cost more than the thing it judged**: $0.000528 against a
+$0.000469 router run. Evaluation is not free, and a judge invoked per
+request in production would cost more than the routing it validates.
+That is why judging is an offline `--judge` flag over a fixed dataset,
+not something the pipeline does.
+
+### Free-tier quotas constrain all of this
+
+Two separate limits, both discovered by hitting them:
+
+| Quota | Limit |
+| --- | --- |
+| `GenerateRequestsPerMinutePerProjectPerModel` | **5 / minute** |
+| `GenerateRequestsPerDayPerProjectPerModel` | **20 / day** |
+
+A judged case spends about five calls, three of them on the baseline
+model — so roughly **six judged cases per model per day**. Three
+evaluation runs exhausted `gemini-3.6-flash` for a whole day.
+
+This shaped two pieces of the code. `--delay` paces a run rather than
+colliding with the per-minute limit, and `app/retry.py` now reads the
+server's own `RetryInfo` hint (`"retryDelay": "56s"`) instead of backing
+off 1s and 2s into a per-minute quota that cannot possibly have cleared.
+Exponential backoff is the right default only when the server has not
+told you exactly how long to wait.
 
 ## Model availability
 
@@ -485,9 +567,9 @@ Phase 3 Reliability — done: retries, timeouts, fallback, the FastAPI
          transport, and confidence-aware routing
 Phase 4 Kafka — done: infrastructure, a producer (one event per request),
          and an analytics consumer that aggregates per-model stats
-Phase 5 Evaluation — in progress: cost calculation, a versioned dataset,
-         and a router-vs-baseline harness are done; response quality
-         (LLM-as-judge) is the remaining gap
+Phase 5 Evaluation — done: cost calculation, a versioned dataset, a
+         router-vs-baseline harness, and pairwise quality judging with
+         position-bias control
 Phase 6 PostgreSQL
 Phase 7 LangChain
 Phase 8 LangGraph
