@@ -7,3 +7,6 @@ pytest>=8.0.0,<9.0.0
 # this venv, but pinning it explicitly means a fresh install doesn't
 # silently depend on some other package continuing to pull it in.
 httpx>=0.27.0,<1.0.0
+# Lint. Configured in setup.cfg -- without a declared line length, editors
+# fall back to 79 and flag most of this codebase as a style violation.
+flake8>=7.0.0,<8.0.0

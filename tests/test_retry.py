@@ -11,8 +11,14 @@ from app.retry import (
 )
 
 
-def rate_limit_error(delay_seconds: float) -> errors.ClientError:
-    """A 429 carrying the google.rpc.RetryInfo hint Gemini really sends."""
+def rate_limit_error(delay: float | str) -> errors.ClientError:
+    """A 429 carrying the google.rpc.RetryInfo hint Gemini really sends.
+
+    `delay` is passed through verbatim when it is a string, so tests can
+    reproduce the exact wire format observed from the API ("58s", no
+    decimal point) rather than only the float form.
+    """
+    retry_delay = delay if isinstance(delay, str) else f"{delay}s"
     return errors.ClientError(
         429,
         {
@@ -23,7 +29,7 @@ def rate_limit_error(delay_seconds: float) -> errors.ClientError:
                     {"@type": "type.googleapis.com/google.rpc.Help"},
                     {
                         "@type": "type.googleapis.com/google.rpc.RetryInfo",
-                        "retryDelay": f"{delay_seconds}s",
+                        "retryDelay": retry_delay,
                     },
                 ],
             }
@@ -31,9 +37,27 @@ def rate_limit_error(delay_seconds: float) -> errors.ClientError:
     )
 
 
+def server_error(code: int = 504) -> errors.ServerError:
+    return errors.ServerError(
+        code, {"error": {"message": "deadline exceeded"}}
+    )
+
+
+def client_error(code: int) -> errors.ClientError:
+    return errors.ClientError(code, {"error": {"message": "error"}})
+
+
 class RetryAfterTests(unittest.TestCase):
-    def test_reads_the_hint_from_a_real_shaped_429(self) -> None:
-        self.assertAlmostEqual(retry_after_seconds(rate_limit_error(56.08)), 56.08)
+    def test_reads_an_integer_hint_as_the_api_really_sends_it(self) -> None:
+        """The observed wire format is "58s", not "58.0s"."""
+        hinted = retry_after_seconds(rate_limit_error("58s"))
+
+        self.assertAlmostEqual(hinted, 58.0)
+
+    def test_reads_a_fractional_hint(self) -> None:
+        hinted = retry_after_seconds(rate_limit_error("56.083075953s"))
+
+        self.assertAlmostEqual(hinted, 56.083075953)
 
     def test_returns_none_when_there_is_no_hint(self) -> None:
         plain = errors.ClientError(429, {"error": {"code": 429}})
@@ -59,14 +83,6 @@ class RetryAfterTests(unittest.TestCase):
         )
 
         self.assertIsNone(retry_after_seconds(bad))
-
-
-def server_error(code: int = 504) -> errors.ServerError:
-    return errors.ServerError(code, {"error": {"message": "deadline exceeded"}})
-
-
-def client_error(code: int) -> errors.ClientError:
-    return errors.ClientError(code, {"error": {"message": "error"}})
 
 
 class IsRetryableTests(unittest.TestCase):

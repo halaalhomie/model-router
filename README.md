@@ -91,6 +91,16 @@ venv\Scripts\python.exe -m pytest
 No test makes a network call. The Gemini client is injected into every function
 that needs it, so tests pass fake clients instead (see `tests/fakes.py`).
 
+Lint:
+
+```
+venv\Scripts\python.exe -m flake8 app tests
+```
+
+Line length is set to 88 in `setup.cfg`. Without a declared value, editors
+fall back to pycodestyle's 79 and flag most of this codebase as a style
+violation, which buries real findings under noise.
+
 ## Modules
 
 | Module | Responsibility |
