@@ -82,6 +82,15 @@ It prints a line per event and a per-model summary on Ctrl+C. Stopping it
 does not affect the router; restarting it resumes from its last committed
 offset rather than replaying everything.
 
+To persist those events to PostgreSQL, run the second consumer:
+
+```
+venv\Scripts\python.exe -m app.persist
+```
+
+Both consumers read the same topic in different groups, hold separate
+offsets, and neither blocks the other.
+
 ## Test
 
 ```
@@ -119,6 +128,9 @@ violation, which buries real findings under noise.
 | `app/judge.py` | Pairwise quality judging, with position-bias control |
 | `app/events.py` | Publishes one Kafka event per completed request |
 | `app/consumer.py` | Reads those events and aggregates per-model stats |
+| `app/storage.py` | Upserts completed requests into PostgreSQL |
+| `app/schema.sql` | The `requests` fact table and its indexes |
+| `app/persist.py` | Second consumer group: writes events to PostgreSQL |
 | `app/console.py` | Console helpers shared by both CLI entry points |
 | `app/main.py` | CLI adapter over the pipeline |
 | `app/api.py` | HTTP adapter over the pipeline (FastAPI + uvicorn) |
@@ -543,6 +555,62 @@ off 1s and 2s into a per-minute quota that cannot possibly have cleared.
 Exponential backoff is the right default only when the server has not
 told you exactly how long to wait.
 
+## PostgreSQL
+
+Persistence sits behind Kafka, not in the request path, for the same
+reason publishing does: the caller must never wait on a database. If
+Postgres is down, requests keep being answered and the events wait in the
+topic until `app/persist.py` comes back and drains them.
+
+**One wide table, not a normalized model.** `requests` is a fact table.
+The profile, the routing decision, and the response are all facts about
+one finished request; none is ever updated alone or shared with another
+row. Splitting them across four tables would buy nothing and cost a
+four-way join on every analytics query.
+
+**Every write is an upsert.** `app/consumer.py` commits offsets *after*
+processing, which is at-least-once: a crash between the write and the
+commit redelivers the event on restart. A plain `INSERT` would then fail
+on a duplicate key. Keying on `request_id` with `ON CONFLICT DO UPDATE`
+means seeing an event twice produces the same single row — verified by
+writing one event three times and getting one row back.
+
+`DO UPDATE` rather than `DO NOTHING` is deliberate: replay is a real
+tool. This project has already changed how cost is calculated once, and
+rows written before that change are wrong. Resetting a consumer group to
+the start of the topic repairs them; `DO NOTHING` would skip them
+forever.
+
+**Money is `NUMERIC(12,8)`, not floating point.** These are sub-cent
+values summed across many rows, which is precisely where binary floats
+accumulate error. Cost columns are nullable, so "could not be priced"
+reaches the database as `NULL` rather than a lying `0.00` — the same rule
+`app/pricing.py` follows, carried all the way through the event into the
+schema. Rows written before cost tracking existed show exactly that.
+
+**Schema is applied with `CREATE TABLE IF NOT EXISTS` on startup.** That
+is enough while the schema only grows. The first time a column must
+change type or be dropped without losing rows, this needs Alembic —
+`IF NOT EXISTS` silently does nothing to a table that already exists
+with the wrong shape.
+
+The query the table exists to answer:
+
+```sql
+SELECT response_model,
+       count(*)                AS requests,
+       round(avg(latency_ms))  AS avg_ms,
+       sum(answering_cost_usd) AS answering,
+       sum(analyzer_cost_usd)  AS routing,
+       count(*) FILTER (WHERE answering_cost_usd IS NULL) AS unpriced
+FROM requests
+GROUP BY response_model;
+```
+
+`sum()` ignores NULLs and the `FILTER` clause counts them, so an unpriced
+request cannot quietly deflate a total — the same honesty the in-memory
+consumer has, expressed in SQL.
+
 ## Model availability
 
 `client.models.list()` is not a reliable guide to what a key can actually call.
@@ -580,7 +648,8 @@ Phase 4 Kafka — done: infrastructure, a producer (one event per request),
 Phase 5 Evaluation — done: cost calculation, a versioned dataset, a
          router-vs-baseline harness, and pairwise quality judging with
          position-bias control
-Phase 6 PostgreSQL
+Phase 6 PostgreSQL — done: a requests fact table, idempotent upserts, and
+         a second consumer group that persists the event stream
 Phase 7 LangChain
 Phase 8 LangGraph
 Phase 9 Dashboard

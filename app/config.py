@@ -25,6 +25,7 @@ class Settings:
     request_timeout_seconds: float
     kafka_bootstrap_servers: str
     kafka_consumer_group: str
+    database_url: str
 
 
 # Live-measured request times on the configured catalog run 2-19s (see
@@ -87,6 +88,27 @@ def load_request_timeout_seconds() -> float:
     return timeout
 
 
+def load_database_url() -> str:
+    """Build the connection URL from the POSTGRES_* vars.
+
+    docker-compose.yml already reads POSTGRES_USER/PASSWORD/DB to create
+    the database; deriving the client's URL from those same values keeps
+    one source of truth rather than a second copy of the password that can
+    drift out of step. DATABASE_URL still wins when set, which is what a
+    deployment pointing at a managed database would use.
+    """
+    explicit = os.getenv("DATABASE_URL")
+    if explicit:
+        return explicit
+
+    user = require("POSTGRES_USER")
+    password = require("POSTGRES_PASSWORD")
+    database = require("POSTGRES_DB")
+    host = optional_str("POSTGRES_HOST", "localhost")
+    port = optional_str("POSTGRES_PORT", "5432")
+    return f"postgresql://{user}:{password}@{host}:{port}/{database}"
+
+
 def load_settings() -> Settings:
     """Load required settings from .env into one validated object."""
     load_dotenv()
@@ -107,4 +129,5 @@ def load_settings() -> Settings:
         kafka_consumer_group=optional_str(
             "KAFKA_CONSUMER_GROUP", DEFAULT_KAFKA_CONSUMER_GROUP
         ),
+        database_url=load_database_url(),
     )

@@ -11,6 +11,9 @@ COMPLETE_ENV = {
     "GEMINI_CODE_MODEL": "code",
     "GEMINI_REASONING_MODEL": "reasoning",
     "GEMINI_LONG_CONTEXT_MODEL": "long-context",
+    "POSTGRES_USER": "router",
+    "POSTGRES_PASSWORD": "secret",
+    "POSTGRES_DB": "model_router",
 }
 
 
@@ -77,6 +80,40 @@ class LoadSettingsTests(unittest.TestCase):
             settings = load_settings()
 
         self.assertEqual(settings.kafka_bootstrap_servers, "broker-1:19092")
+
+    def test_derives_the_database_url_from_the_postgres_vars(self) -> None:
+        """One source of truth: docker-compose creates the database from
+        these same values, so the client URL is built from them rather
+        than duplicating the password into a second variable."""
+        with mock.patch.dict("os.environ", COMPLETE_ENV, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(
+            settings.database_url,
+            "postgresql://router:secret@localhost:5432/model_router",
+        )
+
+    def test_database_host_and_port_can_be_overridden(self) -> None:
+        env = dict(
+            COMPLETE_ENV, POSTGRES_HOST="db.internal", POSTGRES_PORT="6543"
+        )
+
+        with mock.patch.dict("os.environ", env, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(
+            settings.database_url,
+            "postgresql://router:secret@db.internal:6543/model_router",
+        )
+
+    def test_an_explicit_database_url_wins(self) -> None:
+        """What a deployment against a managed database would set."""
+        env = dict(COMPLETE_ENV, DATABASE_URL="postgresql://elsewhere/db")
+
+        with mock.patch.dict("os.environ", env, clear=True):
+            settings = load_settings()
+
+        self.assertEqual(settings.database_url, "postgresql://elsewhere/db")
 
     def test_accepts_a_timeout_exactly_at_the_floor(self) -> None:
         env = dict(COMPLETE_ENV, REQUEST_TIMEOUT_SECONDS="10")

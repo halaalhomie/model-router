@@ -18,6 +18,7 @@ SETTINGS = Settings(
     request_timeout_seconds=30.0,
     kafka_bootstrap_servers="localhost:9092",
     kafka_consumer_group="test-group",
+    database_url="postgresql://test:test@localhost:5432/test",
 )
 
 

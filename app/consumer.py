@@ -185,11 +185,17 @@ def describe(result: PipelineResult) -> str:
     )
 
 
-def build_consumer(settings: Settings) -> Consumer:
+def build_consumer(
+    settings: Settings, group_id: str | None = None
+) -> Consumer:
+    """Build a consumer, optionally in a group other than the configured
+    one. Each group tracks its own offsets, so a second group reads the
+    same topic without disturbing the first -- which is how the analytics
+    and persistence consumers coexist."""
     return Consumer(
         base_client_config(settings)
         | {
-            "group.id": settings.kafka_consumer_group,
+            "group.id": group_id or settings.kafka_consumer_group,
             # Where a group with no committed offset starts. "earliest"
             # replays the whole topic, which is what an analytics consumer
             # wants; "latest" would ignore everything before it started.
