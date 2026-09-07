@@ -611,6 +611,60 @@ GROUP BY response_model;
 request cannot quietly deflate a total — the same honesty the in-memory
 consumer has, expressed in SQL.
 
+## Why LangChain is not used
+
+Phase 7 was "adopt LangChain where it genuinely reduces complexity". It
+was evaluated against this codebase and rejected, on measurements rather
+than taste. Reproduce with:
+
+```
+pip install langchain langchain-google-genai
+```
+
+**What it would replace.** Only the structured-output setup. This:
+
+```python
+config=types.GenerateContentConfig(
+    response_mime_type="application/json",
+    response_schema=TaskProfile,
+)
+```
+
+becomes `.with_structured_output(TaskProfile, include_raw=True)`. That is
+about three lines saved, at two call sites — the analyzer and the judge.
+
+**What it would cost.** 18 additional packages, and an adapter for a
+token-accounting difference that is easy to miss. Same prompt, same
+model, both libraries:
+
+| | prompt | visible output | thinking | total |
+| --- | --- | --- | --- | --- |
+| `google-genai` | 13 | 85 | 744 *(separate)* | 842 |
+| LangChain | 13 | 656 *(includes reasoning)* | 579 | 669 |
+
+Raw google-genai reports thinking tokens **separately** from visible
+output. LangChain **folds them into** `output_tokens`. `estimate_cost_usd`
+computes billable output as `output + thinking`, which is correct for the
+raw SDK and would double-count against LangChain — 1235 billable tokens
+where the true figure is 656, an **88% overstatement**, in the one
+calculation this project's central claim rests on. Adapting for that
+takes roughly twelve lines, so the swap is a net *increase* in code.
+
+**What it would not buy.** LangChain's real value is provider
+portability, and this project reaches one provider: the Anthropic path
+was explored in Phase 2 and closed off by plan limits. Its `.with_retry()`
+is generic exponential backoff, which would be a regression — `app/retry.py`
+honours Gemini's `RetryInfo` hint, a fix found only by hitting a real 429.
+Its `.with_fallbacks()` is close to `pipeline.py`'s twelve lines, but ours
+knows not to fall back when already on the fast model and records
+`original_model`.
+
+**When this should be revisited.** The moment a second provider is
+reachable, or the workload needs streaming or tool-calling loops. At that
+point the portability LangChain sells starts being worth its weight.
+Until then, adding it would be exactly the resume-driven dependency this
+project set out to avoid.
+
 ## Model availability
 
 `client.models.list()` is not a reliable guide to what a key can actually call.
@@ -650,7 +704,8 @@ Phase 5 Evaluation — done: cost calculation, a versioned dataset, a
          position-bias control
 Phase 6 PostgreSQL — done: a requests fact table, idempotent upserts, and
          a second consumer group that persists the event stream
-Phase 7 LangChain
+Phase 7 LangChain — evaluated and declined, with measurements; see
+         "Why LangChain is not used". Revisit on a second provider.
 Phase 8 LangGraph
 Phase 9 Dashboard
 Phase 10 Productionization
