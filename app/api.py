@@ -21,15 +21,23 @@ connections, speaks HTTP, and calls into FastAPI for each request.
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from google import genai
 from pydantic import BaseModel, field_validator
 
+from app import storage
 from app.client import build_client
 from app.config import Settings, load_settings
 from app.events import EventPublisher, KafkaEventPublisher, build_producer
 from app.pipeline import EXECUTION_FAILURES, run_pipeline
 from app.schemas import PipelineResult
+from app.stats import DashboardStats, read_dashboard
+
+
+DASHBOARD_PATH = Path(__file__).resolve().parent / "dashboard.html"
 
 
 # How long server shutdown may block draining any Kafka messages still
@@ -116,6 +124,29 @@ def health() -> dict[str, str]:
     orchestrator (Phase 10) would not want answered on every heartbeat.
     """
     return {"status": "ok"}
+
+
+@app.get("/stats", response_model=DashboardStats)
+def stats(settings: Settings = Depends(get_settings)) -> DashboardStats:
+    """Aggregates over everything the persistence consumer has stored.
+
+    Opens its own connection rather than sharing a long-lived one. A
+    psycopg connection is not safe to use from several threads at once,
+    and FastAPI runs sync handlers in a thread pool -- so a shared
+    connection would need a pool to be correct. A dashboard is polled
+    every few seconds, not per request, so the few milliseconds of
+    connecting are cheaper than the dependency. Note this endpoint reads
+    history only; /route never touches PostgreSQL.
+    """
+    with storage.connect(settings) as connection:
+        return read_dashboard(connection)
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard() -> str:
+    """The dashboard page. One self-contained file: no build step, no
+    framework, and no CDN, so it renders with the API and nothing else."""
+    return DASHBOARD_PATH.read_text(encoding="utf-8")
 
 
 @app.post("/route", response_model=PipelineResult)

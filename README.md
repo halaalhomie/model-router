@@ -91,6 +91,9 @@ venv\Scripts\python.exe -m app.persist
 Both consumers read the same topic in different groups, hold separate
 offsets, and neither blocks the other.
 
+With the API running, the dashboard is at
+http://127.0.0.1:8000/dashboard, and the JSON behind it at `/stats`.
+
 ## Test
 
 ```
@@ -131,6 +134,8 @@ violation, which buries real findings under noise.
 | `app/storage.py` | Upserts completed requests into PostgreSQL |
 | `app/schema.sql` | The `requests` fact table and its indexes |
 | `app/persist.py` | Second consumer group: writes events to PostgreSQL |
+| `app/stats.py` | Aggregate queries behind the dashboard |
+| `app/dashboard.html` | The dashboard page, served by the API |
 | `app/console.py` | Console helpers shared by both CLI entry points |
 | `app/main.py` | CLI adapter over the pipeline |
 | `app/api.py` | HTTP adapter over the pipeline (FastAPI + uvicorn) |
@@ -733,6 +738,45 @@ graph TD
     persist --> pg[(PostgreSQL)]
 ```
 
+## Dashboard
+
+`GET /dashboard` renders request volume, model distribution, latency
+(mean and p95), cost split into routing and answering, token usage,
+average confidence, fallback rate, and the ten most recent requests.
+`GET /stats` returns the same numbers as JSON.
+
+**No new dependency, no build step, no extra container.** The API and the
+database already existed, so the dashboard is one endpoint and one
+self-contained HTML file — no framework, and no CDN, so it renders with
+the API and nothing else. A charting library or a Grafana container would
+have been more machinery than the question deserves.
+
+**It reads history, never the request path.** `/route` does not touch
+PostgreSQL; the dashboard queries only what the persistence consumer has
+already stored, so a slow aggregate can never slow an answer.
+
+**Each `/stats` call opens its own connection.** A psycopg connection is
+not safe to share across threads, and FastAPI runs sync handlers in a
+thread pool, so a shared connection would need a pool to be correct. A
+dashboard polled every few seconds does not justify that dependency; a
+few milliseconds of connecting is the cheaper trade.
+
+**Unpriced requests are shown, not hidden.** SQL's `sum()` skips NULL, so
+a table full of unpriced rows would otherwise report a confident `$0.00`.
+The totals carry an `unpriced` count, and a model whose requests were all
+unpriced shows `n/a` rather than a zero — the same rule as
+`app/pricing.py`, now visible in the UI.
+
+Verified end to end: a request through the CLI, published to Kafka,
+drained by the persistence consumer, and appearing in `/stats` — 8 rows
+across 4 task types, with the p95 column computed by
+`percentile_cont` in PostgreSQL.
+
+**What it does not show.** Evaluation results and judged quality live in
+`app/evaluation.py`, which prints to the console and persists nothing.
+Putting those on the dashboard means first storing them, which is a
+schema change rather than a UI one, and is not done.
+
 ## Model availability
 
 `client.models.list()` is not a reliable guide to what a key can actually call.
@@ -776,5 +820,6 @@ Phase 7 LangChain — evaluated and declined, with measurements; see
          "Why LangChain is not used". Revisit on a second provider.
 Phase 8 LangGraph — evaluated and declined, with measurements; see
          "Why LangGraph is not used". Revisit on a real cycle.
-Phase 9 Dashboard
+Phase 9 Dashboard — done: /stats and /dashboard over the requests table,
+         no new dependency. Evaluation results are not persisted, so not shown.
 Phase 10 Productionization
