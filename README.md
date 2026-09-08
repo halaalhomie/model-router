@@ -665,6 +665,74 @@ point the portability LangChain sells starts being worth its weight.
 Until then, adding it would be exactly the resume-driven dependency this
 project set out to avoid.
 
+## Why LangGraph is not used
+
+Phase 8 asked for LangGraph "because the workflow is stateful and
+conditional, not because we want it on the stack". So the workflow was
+built as a `StateGraph` and compared against the existing function.
+Reproduce with `pip install langgraph`.
+
+**The spike reached full behavioural parity** on all three paths — normal
+routing, fallback after a failure, and the rule that a request already on
+`fast_model` re-raises instead of looping. Both implementations returned
+identical routing, identical fallback flags, and the same exception type.
+
+**Then it was measured:**
+
+| | Current | LangGraph |
+| --- | --- | --- |
+| Orchestration code | **39 lines** | **93 lines** |
+| Packages | 0 extra | 15 |
+
+Two and a half times the code for the same behaviour, and the extra
+lines are not incidental:
+
+- `client` and `settings` were plain function arguments. A graph node
+  receives only state, so they had to be stashed *inside* the state
+  dictionary — dependencies smuggled into a data structure.
+- The "already on fast_model" rule became a `raise` inside the routing
+  function that picks the next edge. A function whose job is to return
+  an edge name is the wrong place to throw from.
+
+**The honest reason it does not fit.** LangGraph earns its weight on
+cycles, checkpoint/resume, human-in-the-loop interrupts, and parallel
+fan-out. This request path has none: it is linear, has exactly one
+branch, finishes in about three seconds, and runs in one process. A
+graph framework is the right tool for a graph, and this is a line.
+
+**The cycle that would justify it is one we measured as uneconomic.**
+The roadmap diagrammed `Generate → Evaluate → Bad → Retry`, which is a
+genuine loop. But Phase 5 measured judging at `$0.000528` against a
+`$0.000469` request — *the judge costs more than the thing it judges*.
+Putting it in the request path would roughly double per-request cost to
+catch a quality problem that judged 2 ties out of 2. That is why judging
+is an offline flag over a fixed dataset, and why the loop that would
+earn LangGraph does not exist.
+
+**Revisit when** the request path grows a real cycle — a retry loop
+driven by a cheap validity check rather than an LLM judge, or
+tool-calling — or when a workflow runs long enough that resuming it
+after a crash matters.
+
+**What was kept.** The spike's one genuinely useful output was a diagram,
+which costs nothing to keep once the dependency is gone:
+
+```mermaid
+graph TD
+    START([request]) --> analyze[ANALYZER<br/>cheap model, structured output]
+    analyze --> route[ROUTER<br/>pure function, no I/O]
+    route --> execute[EXECUTOR<br/>retry + timeout]
+    execute -->|ok| result[PipelineResult]
+    execute -.->|failed, and not already fast_model| fallback[FALLBACK<br/>retry once on fast_model]
+    execute -.->|failed, already fast_model| raise([raise])
+    fallback --> result
+    result --> caller([response to caller])
+    result -.->|best effort, never blocks| kafka[(Kafka<br/>model-router.requests)]
+    kafka --> analytics[analytics consumer]
+    kafka --> persist[persistence consumer]
+    persist --> pg[(PostgreSQL)]
+```
+
 ## Model availability
 
 `client.models.list()` is not a reliable guide to what a key can actually call.
@@ -706,6 +774,7 @@ Phase 6 PostgreSQL — done: a requests fact table, idempotent upserts, and
          a second consumer group that persists the event stream
 Phase 7 LangChain — evaluated and declined, with measurements; see
          "Why LangChain is not used". Revisit on a second provider.
-Phase 8 LangGraph
+Phase 8 LangGraph — evaluated and declined, with measurements; see
+         "Why LangGraph is not used". Revisit on a real cycle.
 Phase 9 Dashboard
 Phase 10 Productionization
