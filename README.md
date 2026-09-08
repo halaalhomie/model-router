@@ -777,6 +777,52 @@ across 4 task types, with the p95 column computed by
 Putting those on the dashboard means first storing them, which is a
 schema change rather than a UI one, and is not done.
 
+## Running the whole system in Docker
+
+```
+docker compose up -d --build
+```
+
+Brings up four containers — Kafka, PostgreSQL, the API, and the
+persistence consumer — with the API on
+http://127.0.0.1:8000 and the dashboard at `/dashboard`.
+
+**One image, two roles.** `app` and `persistence` are the same image
+differing only by `command`. One build, so the two cannot drift apart.
+
+**Addresses differ inside the network, which is what the two Kafka
+listeners were for.** From the host, Kafka is `localhost:9092`
+(`PLAINTEXT_HOST`). From another container it is `kafka:19092`
+(`PLAINTEXT`). The app services override `KAFKA_BOOTSTRAP_SERVERS` and
+`POSTGRES_HOST` accordingly; everything else comes from `.env`.
+
+**Secrets stay out of the image.** `.dockerignore` excludes `.env` before
+the build context is even uploaded, and configuration arrives through the
+environment at run time. Verified by searching the built image: no `.env`
+anywhere in it. `tests/` and `venv/` are excluded too, and the image
+installs `requirements.txt` only — which is why `requirements-dev.txt`
+was split out in Phase 2: pytest and flake8 never reach production.
+
+**Non-root.** The container runs as uid 10001. A process that does not
+need to own the filesystem should not.
+
+### The Kafka healthcheck is a TCP connect, deliberately
+
+The obvious check is `kafka-topics.sh --list`. It was tried, and it
+**took 68 seconds** on this machine, because each probe starts a JVM — so
+it can never pass a sensible timeout and marks a working broker
+unhealthy. Two corrections came out of getting this wrong:
+
+- The check is now a bare TCP connect to the listener. Weaker than
+  "serving metadata", but it is the claim worth making every 15 seconds.
+- It uses `CMD`, not `CMD-SHELL`. `/dev/tcp` is a bash builtin and this
+  image's `/bin/sh` is not bash, so `CMD-SHELL` fails with
+  "nonexistent directory" whether the broker is up or not.
+
+Verified end to end in containers: `POST /route` answered by the
+containerized API, the event consumed by the containerized persistence
+consumer, and the row visible through `/stats`.
+
 ## Model availability
 
 `client.models.list()` is not a reliable guide to what a key can actually call.
@@ -822,4 +868,6 @@ Phase 8 LangGraph — evaluated and declined, with measurements; see
          "Why LangGraph is not used". Revisit on a real cycle.
 Phase 9 Dashboard — done: /stats and /dashboard over the requests table,
          no new dependency. Evaluation results are not persisted, so not shown.
-Phase 10 Productionization
+Phase 10 Productionization — done: the app is containerized and the whole
+         system comes up with one command. Not deployed to a host; the
+         architecture diagram, API docs and benchmarks already existed.

@@ -1,0 +1,25 @@
+# Everything the image must not contain. .env is first for a reason: the
+# build context is uploaded to the daemon and anything copied in stays in
+# a layer, so a secret that reaches the image is effectively published
+# with it. Config comes from the environment at run time instead.
+.env
+.env.*
+!.env.example
+
+# Not needed in the image, and enormous: venv alone is hundreds of MB of
+# Windows-built packages that would be wrong for a Linux container anyway.
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# History and local tooling.
+.git/
+.gitignore
+.dockerignore
+
+# Test-only code. The image runs the app; tests run in CI or locally.
+tests/
+
+# Generated artefacts.
+*.pdf

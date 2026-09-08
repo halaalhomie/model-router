@@ -66,11 +66,23 @@ services:
     # (removes containers) loses topics; `docker compose stop` (keeps
     # containers) does not. Fine while we're still learning the CLI --
     # worth revisiting once real data needs to survive a full teardown.
+    healthcheck:
+      # A bare TCP connect to the client listener. The obvious check --
+      # kafka-topics.sh --list -- is a JVM start per probe and measured
+      # 68s on this machine under load, so it can never pass a sane
+      # timeout and marks a working broker unhealthy. This proves the
+      # listener is accepting connections, which is a weaker claim than
+      # "serving metadata" but is the one worth making every 15s.
+      # CMD, not CMD-SHELL: /dev/tcp is a bash builtin and this image's
+      # /bin/sh is not bash, so CMD-SHELL fails with "nonexistent
+      # directory" regardless of whether the broker is up.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/9092"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   postgres:
-    # Not used by any app code until Phase 6 -- brought up now only because
-    # it needs the same Docker Desktop dependency Kafka does, so there is no
-    # reason to make that a second separate setup step later.
     image: postgres:18
     container_name: model-router-postgres
     ports:
@@ -79,6 +91,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     volumes:
       # Postgres 18+ changed convention: the image now expects one mount at
       # /var/lib/postgresql (not .../data like every older Postgres image)
@@ -86,6 +103,48 @@ services:
       # pg_upgrade across major versions without a mount-point boundary in
       # the way. Confirmed by the image's own startup error, not a guess.
       - postgres-data:/var/lib/postgresql
+
+  # The app and the persistence consumer are the same image in two roles,
+  # differing only by command. One build, no chance of the two drifting
+  # apart.
+  #
+  # Both override two settings from .env, because addresses that are
+  # correct on the host are wrong inside the compose network. Kafka is
+  # reached at kafka:19092 -- the PLAINTEXT listener defined above, meant
+  # for other containers -- rather than localhost:9092, which is the
+  # PLAINTEXT_HOST listener meant for processes on the host. That is what
+  # the two-listener setup was for.
+  app:
+    build: .
+    image: model-router:local
+    container_name: model-router-api
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      POSTGRES_HOST: postgres
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  persistence:
+    build: .
+    image: model-router:local
+    container_name: model-router-persistence
+    command: ["python", "-m", "app.persist"]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      POSTGRES_HOST: postgres
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres-data:

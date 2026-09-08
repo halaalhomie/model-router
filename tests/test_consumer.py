@@ -301,6 +301,25 @@ class ConsumeForeverTests(unittest.TestCase):
         self.assertEqual(stats.total, 1)
         self.assertEqual(len(consumer.committed), 1)
 
+    def test_waits_quietly_for_a_topic_that_does_not_exist_yet(self) -> None:
+        """A consumer that starts before the first publish sees this until
+        the topic is created. It resolves itself, so it is not an error."""
+        consumer = FakeKafkaConsumer(
+            [
+                FakeMessage(
+                    error=FakeKafkaError(KafkaError.UNKNOWN_TOPIC_OR_PART)
+                ),
+                event(make_result("a")),
+            ]
+        )
+        stats = RequestStats()
+
+        with self.assertLogs("app.consumer", level=logging.INFO) as captured:
+            consume_forever(consumer, stats, max_events=1)  # type: ignore[arg-type]
+
+        self.assertEqual(stats.total, 1)
+        self.assertNotIn("ERROR", captured.output[0])
+
     def test_logs_a_real_kafka_error_without_stopping(self) -> None:
         consumer = FakeKafkaConsumer(
             [

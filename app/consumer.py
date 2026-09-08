@@ -232,8 +232,20 @@ def consume_forever(
         if error is not None:
             # _PARTITION_EOF just means "caught up with this partition",
             # which is normal and not a failure worth reporting.
-            if error.code() != KafkaError._PARTITION_EOF:
-                logger.error("Kafka error while consuming: %s", error)
+            if error.code() == KafkaError._PARTITION_EOF:
+                continue
+            # UNKNOWN_TOPIC_OR_PART is expected when a consumer starts
+            # before anything has produced: the topic is created on first
+            # publish, so a consumer that came up first sees this until it
+            # exists. It resolves itself, so it is not an error -- but it
+            # is worth saying once, because a permanent version of it (a
+            # misspelled topic) looks identical.
+            if error.code() == KafkaError.UNKNOWN_TOPIC_OR_PART:
+                logger.info(
+                    "Topic not available yet; waiting for it to be created."
+                )
+                continue
+            logger.error("Kafka error while consuming: %s", error)
             continue
 
         try:
